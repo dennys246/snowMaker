@@ -118,7 +118,7 @@ class Labeler:
             int: The predicted label for the input image.
         """
         # Preprocess the image
-        image = cv2.resize(image, (28, 28, 1))  # Resize to match model input
+        image = cv2.resize(image, (28, 28))  # Resize to match model input
         image = image.astype("float32") / 255.0  # Normalize the image
         image = np.reshape(image, (1, 28, 28, 1)) # Add batch dimension
         
