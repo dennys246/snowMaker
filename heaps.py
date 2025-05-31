@@ -23,7 +23,7 @@ class MinHeap:
 		for value in values:
 			self.insert(value)
 
-	def extract_min(self): # Function probably has high constant and could be simplified
+	def extract(self): # Function probably has high constant and could be simplified
 		if len(self.heap) == 0: return None
 		
 		self.heap[0], self.heap[-1] = self.heap[-1], self.heap[0]# Switch the first and last positions - Preserves structure
@@ -51,7 +51,7 @@ class MinHeap:
 				position = (position << 1) + 1 # Set new position of value of interest
 		return min
 
-	def find_min(self):
+	def find(self):
 		return self.heap[0]
 
 	def size(self):
@@ -76,7 +76,7 @@ class MaxHeap:
 		for value in values:
 			self.insert(value)
 
-	def extract_max(self): # Function has high constant and could be simplified
+	def extract(self): # Function has high constant and could be simplified
 		if len(self.heap) == 0: return None
 		
 		self.heap[0], self.heap[-1] = self.heap[-1], self.heap[0]# Switch the first and last positions - Preserves structure
@@ -106,7 +106,7 @@ class MaxHeap:
 				position = (position << 1) + 1 # Set new position of value of interest
 		return max
 
-	def find_max(self):
+	def find(self):
 		return self.heap[0]
 
 	def size(self):
