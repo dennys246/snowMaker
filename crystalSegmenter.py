@@ -5,7 +5,6 @@ import tensorflow as tf
 from labeler import Labeler
 from glob import glob
 
-
 class colorSegmenter:
 
     def __init__(self):
@@ -16,7 +15,7 @@ class colorSegmenter:
             'Blue': blueSegment()
         }
 
-    def segment(self, image_path, plot = False):
+    def segment(self, image_path, plot = False, overwrite = True):
         """
         Segment the image based on predefined colors and sizes.
         Args:
@@ -130,7 +129,6 @@ class colorSegmenter:
                 print("Skipping: No approximated contour.")
                 return None  # or return, pass, etc.
 
-
             # Find the centroid
             x_avg = 0
             y_avg = 0
@@ -243,7 +241,7 @@ class redSegment:
         self.color = 'Red'
         self.size = (400, 500)
         self.lower_color = np.array([0, 0, 30])
-        self.upper_color = np.array([45, 35, 140])
+        self.upper_color = np.array([59, 43, 195])
 
         self.heap = heaps.MinHeap
 
@@ -269,7 +267,7 @@ class redSegment:
             image_filename (str): The name of the original image file.
         """
         if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Scripts/AvalancheAI/snow-profiles/segmented/profiles/"
+            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/profiles/"
         image_filename = f"{data_directory}{image_filename}" # Create a new filename for the red segment
         cv2.imwrite(f"{image_filename}", image)
         print(f"Red segment saved in {image_filename}")
@@ -282,10 +280,10 @@ class greenSegment:
     def __init__(self):
         self.color = 'Green'
         self.size = (200, 500)
-        self.lower_color = np.array([20, 15, 0])
-        self.upper_color = np.array([50, 60, 52])
+        self.lower_color = np.array([10, 10, 0])
+        self.upper_color = np.array([75, 75, 58])
 
-        self.labeler = Labeler() # Initialize the labeler
+        self.labeler = Labeler("/Users/dennyschaedig/Scripts/avai/models/crystaldig/label_model.h5") # Initialize the labeler
 
         self.heap = heaps.MinHeap
     
@@ -361,7 +359,7 @@ class greenSegment:
             image_filename (str): The name of the original image file.
         """
         if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Scripts/AvalancheAI/snow-profiles/segmented/labels/"
+            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/labels/"
         image_filename = f"{data_directory}{image_filename}" # Create a new filename for the red segment
         cv2.imwrite(image_filename, image)
         print(f"Green segment saved in {image_filename}")
@@ -403,7 +401,7 @@ class blueSegment:
             data_directory (str): Directory to save the image.
         """
         if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Scripts/AvalancheAI/snow-profiles/segmented/cores/"
+            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/cores/"
         image_filename = f"{data_directory}{image_filename}" # Create a new filename for the blue segment
         cv2.imwrite(image_filename, image)
         print(f"Blue segment saved in {image_filename}")
@@ -413,8 +411,7 @@ if __name__ == "__main__":
     
     #results = segmenter.segment('../snow-profiles/raw/IMG_2404.JPG', True)
     
-
-    snow_images = glob("/Users/dennyschaedig/Scripts/AvalancheAI/snow-profiles/raw/*.JPG")
+    snow_images = glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/corrected/*.JPG")
     for snow_image in snow_images:
         results = segmenter.segment(snow_image, False)
         if results:

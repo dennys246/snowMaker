@@ -1,26 +1,25 @@
-
 from glob import glob
-
 
 def grab_filenames(filepaths):
     return [filepath.split('/')[-1] for filepath in filepaths]
 
 # Grab all images
-raw_images = set(grab_filenames(glob("../snow-profiles/raw/*.JPG")))
+raw_images = set(grab_filenames(glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/raw/*.JPG")))
 
 # Grab magnified images
-magnified_images = set(grab_filenames(glob("../snow-profiles/segmented/magnified-profiles/tempA/*.JPG")))
+magnified_images = set(grab_filenames(glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/magnified-profiles/*.JPG")))
 print(f"Magnified images: {magnified_images}\n\n")
 
 # Grab segmented profiles
-profile_images = set(grab_filenames(glob("../snow-profiles/segmented/profiles/*.JPG")))
+profile_images = set(grab_filenames(glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/profiles/*.JPG")))
 print(f"Profile images: {profile_images}\n\n")
 
 # Grab segmented cores
-core_images = set(grab_filenames(glob("../snow-profiles/segmented/cores/*.JPG")))
+core_images = set(grab_filenames(glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/cores/*.JPG")))
 print(f"Core images: {core_images}\n\n")
+
 # Grab segmented labels
-label_images = grab_filenames(glob("../snow-profiles/segmented/labels/*.JPG"))
+label_images = grab_filenames(glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/labels/*.JPG"))
 label_images = set([f"{"_".join(image.split('_')[:2])}.JPG" for image in magnified_images])
 print(f"Label images: {label_images}\n\n")
 

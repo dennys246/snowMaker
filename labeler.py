@@ -8,13 +8,13 @@ class Labeler:
     This class initializes a CNN model, loads a dataset, and provides methods for training and evaluating the model.
     """
 
-    def __init__(self):
+    def __init__(self, model_filepath = "./label_model.h5"):
         # Define labels
         self.x_train = None
 
         # Load model if it exists
         try:
-            self.model = tf.keras.models.load_model('label_model.h5')
+            self.model = tf.keras.models.load_model(model_filepath)
             print("Model loaded successfully.")
         except Exception as e:
             print(f"Error loading model: {e}")
