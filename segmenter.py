@@ -1,8 +1,8 @@
-import cv2, heaps, labeler
+import cv2, heaps, label_classifier
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from labeler import Labeler
+from label_classifier import Labeler
 from glob import glob
 
 class colorSegmenter:
