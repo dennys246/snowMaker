@@ -1,12 +1,12 @@
 """
 snowMaker
 
-Core snow simulation and generation tools.
+Core pipeline for extracting data from the Rocky Mountain snowpack
+dataset hosting on hugging faces 
+(https://huggingface.co/datasets/dennys246/rocky_mountain_snowpack).
 
 Modules:
-- script_a: Contains generate_snow()
-- script_b: Contains melt_snow()
-- tools: Utilities for snow texture processing
+- pipeline: Class for piping snowpack data
 """
 
 # Explicit imports from modules

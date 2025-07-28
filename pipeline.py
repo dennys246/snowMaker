@@ -94,7 +94,11 @@ class pipeline:
 
 	def resample(self, image):
 		"""
-		Slip the image 180 degrees to easily resample the snowpack sample
+		Slip the image 180 degrees to easily resample the snowpack sample.
+		
+		WARNING - This function should not be used on core data that 
+		requires preserving the temporal relationship between cores 
+		as flipping the image removes this relationship.
 
 		Function arguments:
 			image (3D numpy array) - Numpy array containing a single RGB image 
