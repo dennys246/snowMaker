@@ -1,9 +1,9 @@
 import random
-# ------------------------ Heap Data Structure ------------------------ #
+"""------------------------ Heap Data Structure ------------------------ 
 # This data structure is used to easily find the minimum/maximum if
 # if you find yourself constantly calculating the minimum of a list.
 # The last class generates and maintains two heaps (one min and one max)
-# allowing for the median to quickly be found at any given moment
+# allowing for the median to quickly be found at any given moment"""
 class MinHeap:
 	def __init__(self, content = None):
 		self.heap = []
