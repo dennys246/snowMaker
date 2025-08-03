@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 class pipeline:
 
-	def __init__(self, model_path, profile_path, resolution):
+	def __init__(self, dataset_path, resolution):
 		"""
 		The pipeline object serves as a loading and preprocessing pipeline for the snowGAN to 
 		pass in trainable data from pictures of snowpack and snow cores. 
@@ -22,8 +22,7 @@ class pipeline:
 			read_loaded() - Load the state and history of the pipeline
 		"""
 		# Assign passed in class attributes
-		self.model_path = model_path
-		self.profile_path = profile_path
+		self.dataset_path = dataset_path
 		self.resolution = resolution
 
 		# Load in history of images loaded if it exists for the current model
@@ -34,13 +33,13 @@ class pipeline:
 			print("No previously trained images detected...")
 
 		# Gather available photos
-		self.avail_photos = [image for image in glob(f"{self.profile_path}*.JPG") if image not in self.images_loaded]
+		self.avail_photos = [image for image in glob(f"{self.dataset_path}*.JPG") if image not in self.images_loaded]
 		print(f"Pipeline loaded with {len(self.avail_photos)} available photos to load...\n")
 		
 
 	def load_batch(self, count, resample = False):
 		"""
-		Load a batch of subjects based on count requested and whether resampling requested
+		Load a batch of data based on count requested and whether resampling requested
 
 		Function arguments:
 			count (int) - Number of images to load in
