@@ -10,9 +10,13 @@ Modules:
 """
 
 # Explicit imports from modules
+import intake
 from pipeline import pipeline
+from segmenter import colorSegmenter
 
 # Define the public API
 __all__ = [
+    "intake",
+    "colorSegmenter",
     "pipeline"
 ]
