@@ -1,13 +1,12 @@
-import cv2, heaps, label_classifier
+import cv2, os, heaps
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from label_classifier import Labeler
 from glob import glob
 
 class colorSegmenter:
 
-    def __init__(self):
+    def __init__(self, dataset_dir):
         """ Initialize the segmenter with predefined colors and sizes."""
         self.colors = {
             'Red': redSegment(),
@@ -15,7 +14,9 @@ class colorSegmenter:
             'Blue': blueSegment()
         }
 
-    def segment(self, image_path, plot = False, overwrite = True):
+        self.dataset_dir = dataset_dir
+
+    def segment(self, image_path, plot = False, overwrite = False):
         """
         Segment the image based on predefined colors and sizes.
         Args:
@@ -34,6 +35,12 @@ class colorSegmenter:
 
         # initialize a median heap
         for color, segment in self.colors.items():# Iterate through each color
+            if os.path.exists(f"{self.dataset_dir}{segment.output_dir}{image_filename}"):
+                FileExistsError(f"File {image_filename} for {segment.color.lower()} segment exists")
+                if overwrite == False:
+                    print(f"Overwriting set to False, skipping image {image_filename}...")
+                    continue
+
             print(f"Image: {image.shape}")
             color_mask = cv2.inRange(image, segment.lower_color, segment.upper_color) # Color mask
             color_count = cv2.countNonZero(color_mask)
@@ -78,7 +85,7 @@ class colorSegmenter:
                 cv2.destroyAllWindows()
 
             # Do color specific post-processing
-            processed_image = segment.process(warped, image_filename, None, plot)
+            processed_image = segment.process(warped, image_filename, self.dataset_dir)
             if plot: # Plot the processed image
                 cv2.imshow(f"Processed {color}", processed_image)
                 cv2.waitKey(0)
@@ -245,7 +252,9 @@ class redSegment:
 
         self.heap = heaps.MinHeap
 
-    def process(self, image, image_filename, data_directory = None, plot = False):
+        self.output_dir = "preprocessed/profiles/"
+
+    def process(self, image, image_filename, dataset_dir):
         """
         Process the red segment. This method can be extended to include 
         specific processing for red segments. Segment the digits in the image.
@@ -255,10 +264,10 @@ class redSegment:
         Returns:
             list: A list of segmented digits.
         """
-        self.save(image, image_filename, data_directory)  # Save the image for further processing
+        self.save(image, image_filename, dataset_dir)  # Save the image for further processing
         return image
     
-    def save(self, image, image_filename, data_directory = None):
+    def save(self, image, image_filename, dataset_dir):
         """
         Save the red segment image for further processing.
         
@@ -266,10 +275,8 @@ class redSegment:
             image (np.ndarray): The input image.
             image_filename (str): The name of the original image file.
         """
-        if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/profiles/"
-        image_filename = f"{data_directory}{image_filename}" # Create a new filename for the red segment
-        cv2.imwrite(f"{image_filename}", image)
+        image_filename = f"{dataset_dir}{self.output_dir}{image_filename}" # Create a new filename for the red segment
+        cv2.imwrite(image_filename, image)
         print(f"Red segment saved in {image_filename}")
 
 class greenSegment:
@@ -283,11 +290,11 @@ class greenSegment:
         self.lower_color = np.array([10, 10, 0])
         self.upper_color = np.array([75, 75, 58])
 
-        self.labeler = Labeler("/Users/dennyschaedig/Scripts/avai/models/crystaldig/label_model.h5") # Initialize the labeler
-
         self.heap = heaps.MinHeap
+
+        self.output_dir = "preprocessed/written_labels/"
     
-    def process(self, image, image_filename, data_directory = None, plot = False):
+    def process(self, image, image_filename, dataset_dir):
         """
         Process the green segment analyzing the hand-written label segment
         using the labeler and saving the image with a name to help label
@@ -302,55 +309,12 @@ class greenSegment:
                                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                cv2.THRESH_BINARY_INV, 
                                11, 2)
-        
-        kernel = np.ones((2, 2), np.uint8)
-        cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
-        dilated = cv2.dilate(cleaned, kernel, iterations = 2)
-
-        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        digits = []
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            if h > 50 and w > 50:  # Filter small noise
-                digit = thresh[y:y+h, x:x+w]
-                digit = cv2.resize(digit, (28, 28))  # Match input size of CNN
-                predicted_digit = self.classify_digit(digit)  # Classify the digit
-                print(f"Predicted digit: {predicted_digit}")
-                # Show image with label
-                if plot:
-                    cv2.imshow(f"Digit {predicted_digit}", digit)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
-                digits.append(str(predicted_digit))
-        if not digits:
-            print("No digits found in the green segment.")
-        else:
-            print(f"Found {len(digits)} digits in the green segment - {predicted_digit}")
-            
-        value_split = image_filename.split('.')
-        print(f"Digits: {digits}")
-        image_filename = value_split[0] + "_" + "-".join(digits) + '.' + value_split[1]
-
-        self.save(image, image_filename, data_directory)  # Save the image for further processing
+        self.save(image, image_filename, dataset_dir)  # Save the image for further processing
         
         return image
 
-    def classify_digit(self, image):
-        """
-        Classify a single digit image using a pre-trained model.
-        
-        Args:
-            digit_image (np.ndarray): The segmented digit image.
-        Returns:
-            int: The predicted digit.
-        """
-        predicted_digit = self.labeler.predict(image)
-        print(f"Predicted digit: {predicted_digit}")
-        return predicted_digit
-
-    def save(self, image, image_filename, data_directory = None):
+    def save(self, image, image_filename, dataset_dir):
         """
         Save the green segment image for further processing.
         
@@ -358,9 +322,7 @@ class greenSegment:
             image (np.ndarray): The input image.
             image_filename (str): The name of the original image file.
         """
-        if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/labels/"
-        image_filename = f"{data_directory}{image_filename}" # Create a new filename for the red segment
+        image_filename = f"{dataset_dir}{self.output_dir}{image_filename}" # Create a new filename for the red segment
         cv2.imwrite(image_filename, image)
         print(f"Green segment saved in {image_filename}")
 
@@ -377,7 +339,9 @@ class blueSegment:
 
         self.heap = heaps.MaxHeap
 
-    def process(self, image, image_filename, data_directory = None, plot = False):
+        self.output_dir = "preprocessed/cores/"
+
+    def process(self, image, image_filename, dataset_dir):
         """
         Process the blue segment. This method can be extended to include 
         specific processing for blue segments. Segment the digits in the image.
@@ -388,10 +352,10 @@ class blueSegment:
         Returns:
             None
         """
-        self.save(image, image_filename, data_directory)  # Save the image for further processing
+        self.save(image, image_filename, dataset_dir)  # Save the image for further processing
         return image
 
-    def save(self, image, image_filename, data_directory):
+    def save(self, image, image_filename, dataset_dir):
         """
         Save the blue segment image for further processing.
         
@@ -400,21 +364,6 @@ class blueSegment:
             image_filename (str): The name of the original image file.
             data_directory (str): Directory to save the image.
         """
-        if data_directory is None:
-            data_directory = f"/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/segmented/cores/"
-        image_filename = f"{data_directory}{image_filename}" # Create a new filename for the blue segment
+        image_filename = f"{dataset_dir}{self.output_dir}{image_filename}" # Create a new filename for the blue segment
         cv2.imwrite(image_filename, image)
         print(f"Blue segment saved in {image_filename}")
-
-if __name__ == "__main__":
-    segmenter = colorSegmenter()
-    
-    #results = segmenter.segment('../snow-profiles/raw/IMG_2404.JPG', True)
-    
-    snow_images = glob("/Users/dennyschaedig/Datasets/rocky_mountain_snowpack/corrected/*.JPG")
-    for snow_image in snow_images:
-        results = segmenter.segment(snow_image, False)
-        if results:
-            print(f"Segmentation successful")
-        else:
-            print(f"Segmentation failed")
