@@ -1,4 +1,4 @@
-import os, cv2, atexit, json
+import os, cv2, atexit, json, random
 import pandas as pd
 from glob import glob
 from segmenter import colorSegmenter
@@ -244,32 +244,42 @@ class valve:
                         image_number = extract_number(image_filename) 
                         # If the file is between the current and next label
                         if image_number >= label_image_number and image_number < next_image_number:
+                            # Assess core depth
                             core_depth = label[2] * 10.0
+
+                            # Decide what split to put it in
+                            flip = random.random()
+                            if flip <= 0.8:
+                                split = 'train'
+                            elif flip > 0.8 and flip <= 0.9:
+                                split = 'test'
+                            else:
+                                split = 'validation'
+
                             # Create metadata entry
                             new_entry = {
                                 'image': f"{data_dir}{image_filename}",
-                                'label': {
-                                    'datatype': data_dir.split('/')[-2][:-1],
-                                    'site': label[0],
-                                    'column': label[1],
-                                    'core': label[2],
-                                    'segment': label[3],
-                                    'core_temperature': core_temp,
-                                    'air_temperature': self.sites.loc[site_mask, 'air_temperature'].iloc[0],
-                                    'ascending_mountain': self.sites.loc[site_mask, 'ascending_mountain'].iloc[0],
-                                    'city_state_country': self.sites.loc[site_mask, 'city_state_country'].iloc[0],
-                                    'collector': self.sites.loc[site_mask, 'collector'].iloc[0],
-                                    'coordinates': [float(coord) for coord in self.sites.loc[site_mask, 'coordinates'].iloc[0].split(', ')],
-                                    'date': self.sites.loc[site_mask, 'date'].iloc[0],
-                                    'time': self.sites.loc[site_mask, 'time'].iloc[0],
-                                    'snowpack_depth': self.sites.loc[site_mask, 'snowpack_depth'].iloc[0],
-                                    'core_depth': core_depth,
-                                    'slope_face': self.sites.loc[site_mask, 'slope_face'].iloc[0],
-                                    'slope_gradient': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
-                                    'avalanches_spotted': self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0],
-                                    'wind_loading': self.sites.loc[site_mask, 'wind_loading'].iloc[0],
-                                    'notes': self.sites.loc[site_mask, 'notes'].iloc[0]
-                                }
+                                'datatype': data_dir.split('/')[-2][:-1],
+                                'site': label[0],
+                                'column': label[1],
+                                'core': label[2],
+                                'segment': label[3],
+                                'core_temperature': core_temp,
+                                'air_temperature': self.sites.loc[site_mask, 'air_temperature'].iloc[0],
+                                'ascending_mountain': self.sites.loc[site_mask, 'ascending_mountain'].iloc[0],
+                                'city_state_country': self.sites.loc[site_mask, 'city_state_country'].iloc[0],
+                                'collector': self.sites.loc[site_mask, 'collector'].iloc[0],
+                                'coordinates': [float(coord) for coord in self.sites.loc[site_mask, 'coordinates'].iloc[0].split(', ')],
+                                'date': self.sites.loc[site_mask, 'date'].iloc[0],
+                                'time': self.sites.loc[site_mask, 'time'].iloc[0],
+                                'snowpack_depth': self.sites.loc[site_mask, 'snowpack_depth'].iloc[0],
+                                'core_depth': core_depth,
+                                'slope_face': self.sites.loc[site_mask, 'slope_face'].iloc[0],
+                                'slope_gradient': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
+                                'avalanches_spotted': self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0],
+                                'wind_loading': self.sites.loc[site_mask, 'wind_loading'].iloc[0],
+                                'notes': self.sites.loc[site_mask, 'notes'].iloc[0],
+                                'split': split
                             }
 
                             # Append to the jsonl dataframe
