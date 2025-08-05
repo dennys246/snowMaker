@@ -198,6 +198,14 @@ class valve:
 
         # Iterate through preprocessing states
         for data_dirs, processing_state in zip([raw_dirs, preproc_dirs], ['raw', 'preprocessed']):
+            old_data = []
+
+            with open(f"{self.dataset_dir}metadata/{processing_state}.jsonl", 'r', encoding='utf-8') as f:
+                for line in f:
+                    old_data.append(json.loads(line))
+
+            previously_handled = [datum['image'] for datum in old_data]
+
             jsonl_data = []
 
             for data_dir in data_dirs:
@@ -238,9 +246,14 @@ class valve:
                         core_temp = None
                     print(f"Temp mask for labels {label}: {temp_mask}")
 
-                    # Iterate through all raw files
+                    # Iterate through all files
                     for image_filepath in datatype_images:
                         image_filename = os.path.basename(image_filepath)
+
+                        # Check if previously handled
+                        if f"{data_dir}{image_filename}" in previously_handled:
+                            continue # Keep existing data
+
                         image_number = extract_number(image_filename) 
                         # If the file is between the current and next label
                         if image_number >= label_image_number and image_number < next_image_number:
@@ -248,13 +261,16 @@ class valve:
                             core_depth = label[2] * 10.0
 
                             # Decide what split to put it in
-                            flip = random.random()
-                            if flip <= 0.8:
-                                split = 'train'
-                            elif flip > 0.8 and flip <= 0.9:
-                                split = 'test'
+                            if processing_state == 'preprocessed':
+                                flip = random.random()
+                                if flip <= 0.8:
+                                    split = 'train'
+                                elif flip > 0.8 and flip <= 0.9:
+                                    split = 'test'
+                                else:
+                                    split = 'validation'
                             else:
-                                split = 'validation'
+                                split = 'none'
 
                             # Create metadata entry
                             new_entry = {
@@ -275,8 +291,8 @@ class valve:
                                 'snowpack_depth': self.sites.loc[site_mask, 'snowpack_depth'].iloc[0],
                                 'core_depth': core_depth,
                                 'slope_face': self.sites.loc[site_mask, 'slope_face'].iloc[0],
-                                'slope_gradient': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
-                                'avalanches_spotted': self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0],
+                                'slope_angle': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
+                                'avalanches_spotted': int(self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0]),
                                 'wind_loading': self.sites.loc[site_mask, 'wind_loading'].iloc[0],
                                 'notes': self.sites.loc[site_mask, 'notes'].iloc[0],
                                 'split': split
@@ -295,12 +311,39 @@ class valve:
 
                         if image_number >= next_image_number:
                             break
-        
+            
+            # Append new data onto old
+            jsonl_data = old_data + jsonl_data
+
+            # Construct filepath and write data
             metadata_path = f"{self.dataset_dir}metadata/{processing_state}.jsonl"
             with open(metadata_path, 'w') as f:
                 for entry in jsonl_data:
                     f.write(json.dumps(entry) + '\n')
 
+            train_data = []
+            test_data = []
+            validation_data = []
+            for ind in range(len(jsonl_data)):
+                
+                # Check if training data
+                if jsonl_data[ind]['split'] == 'train':
+                    train_data.append(jsonl_data[ind])
+
+                # Check if test data
+                if jsonl_data[ind]['split'] == 'test':
+                    test_data.append(jsonl_data[ind])
+
+                # Check if validation data
+                if jsonl_data[ind]['split'] == 'validation':
+                    validation_data.append(jsonl_data[ind])
+
+        # Save data
+        for dtype, data in zip(['train', 'test', 'validation'], [train_data, test_data, validation_data]):
+            jsonl_path = f"{self.dataset_dir}metadata/{dtype}.jsonl"
+            with open(jsonl_path, 'w') as f:
+                for entry in data:
+                    f.write(json.dumps(entry) + '\n')
 
 
     def backup_intakes(self):
