@@ -35,8 +35,9 @@ class colorSegmenter:
 
         # initialize a median heap
         for color, segment in self.colors.items():# Iterate through each color
-            if os.path.exists(f"{self.dataset_dir}{segment.output_dir}{image_filename}"):
-                FileExistsError(f"File {image_filename} for {segment.color.lower()} segment exists")
+            # Check for the original filename or a renamed (labeled) variant like image_N_site_col_core.png
+            stem = image_filename.split('.png')[0]
+            if glob(f"{self.dataset_dir}{segment.output_dir}{stem}.*") or glob(f"{self.dataset_dir}{segment.output_dir}{stem}_*"):
                 if overwrite == False:
                     print(f"Overwriting set to False, skipping image {image_filename}...")
                     continue
