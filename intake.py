@@ -54,9 +54,6 @@ class valve:
         # Check if site has been processed
         site = int(site_folder.split('_')[-1].split('/')[0])
 
-        if site in self.sites['site'].values:
-            print(f"Site already intaken, canceling intake...")
-
         # Add intake parent folder if not specified
         if site_folder[:6] != 'intake':
             print(f"Parent folder intake/ not properly added, adding parent folder to path...")
@@ -70,40 +67,44 @@ class valve:
             print(f"Site folder {self.dataset_dir}{site_folder} not found...")
             return
         
-        # Grab site specific data
-        intake_site = pd.read_csv(f"{self.dataset_dir}{site_folder}site_logs.csv")
+        # Add site logs and temps unless already recorded in the master CSVs
+        if site in self.sites['site'].values:
+            print(f"Site {site} already in site logs, skipping site log and temperature intake...")
+        else:
+            # Grab site specific data
+            intake_site = pd.read_csv(f"{self.dataset_dir}{site_folder}site_logs.csv")
 
-        new_site = { # Create entry for site
-            'site': site,
-            'ascending_mountain': intake_site['ascending_mountain'][0],
-            'city_state_country': intake_site['city_state_country'][0],
-            'collector': intake_site['collector'][0],
-            'coordinates': intake_site['coordinates'][0],
-            'date': intake_site['date'][0],
-            'time': intake_site['time'][0],
-            'snowpack_depth': intake_site['snowpack_depth'][0],
-            'slope_face': intake_site['slope_face'][0],
-            'slope_gradient': intake_site['slope_gradient'][0],
-            'air_temperature': intake_site['air_temperature'][0],
-            'avalanches_spotted': intake_site['avalanches_spotted'][0],
-            'wind_loading': intake_site['wind_loading'][0],
-            'notes': intake_site['notes'][0],
-        }
-
-        self.sites = pd.concat([self.sites, pd.DataFrame([new_site])], ignore_index=True)
-
-        # Grab core data
-        intake_temps = pd.read_csv(f"{self.dataset_dir}{site_folder}site_temps.csv")
-        for record in intake_temps.iterrows():
-            new_temp = { # Create entry for core temperature
+            new_site = { # Create entry for site
                 'site': site,
-                'column': record[1]['column'],
-                'core': record[1]['core'],
-                'core_temperature': record[1]['core_temperature'],
+                'ascending_mountain': intake_site['ascending_mountain'][0],
+                'city_state_country': intake_site['city_state_country'][0],
+                'collector': intake_site['collector'][0],
+                'coordinates': intake_site['coordinates'][0],
+                'date': intake_site['date'][0],
+                'time': intake_site['time'][0],
+                'snowpack_depth': intake_site['snowpack_depth'][0],
+                'slope_face': intake_site['slope_face'][0],
+                'slope_gradient': intake_site['slope_gradient'][0],
+                'air_temperature': intake_site['air_temperature'][0],
+                'avalanches_spotted': intake_site['avalanches_spotted'][0],
+                'wind_loading': intake_site['wind_loading'][0],
+                'notes': intake_site['notes'][0],
             }
-            self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
-            
-        
+
+            self.sites = pd.concat([self.sites, pd.DataFrame([new_site])], ignore_index=True)
+
+            # Grab core data
+            intake_temps = pd.read_csv(f"{self.dataset_dir}{site_folder}site_temps.csv")
+            for record in intake_temps.iterrows():
+                new_temp = { # Create entry for core temperature
+                    'site': site,
+                    'column': record[1]['column'],
+                    'core': record[1]['core'],
+                    'core_temperature': record[1]['core_temperature'],
+                }
+                self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
+
+
         # Construct directory
         data_dir = f"{self.dataset_dir}{site_folder}/*/*"
 
