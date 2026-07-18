@@ -185,6 +185,15 @@ class valve:
 
         extract_number = lambda filename : int(filename.split('image_')[1].split('_')[0].split('.png')[0])
 
+        # Recover previously assigned splits from the split metadata files
+        split_lookup = {}
+        for split_name in ['train', 'test', 'validation']:
+            split_path = f"{self.dataset_dir}metadata/{split_name}.jsonl"
+            if os.path.exists(split_path):
+                with open(split_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        split_lookup[json.loads(line)['file_path']] = split_name
+
         # Grab all label files
         label_files = glob(f"{self.dataset_dir}{label_dir}*")
 
@@ -202,9 +211,12 @@ class valve:
 
             with open(f"{self.dataset_dir}metadata/{processing_state}.jsonl", 'r', encoding='utf-8') as f:
                 for line in f:
-                    old_data.append(json.loads(line))
+                    datum = json.loads(line)
+                    if 'split' not in datum: # Restore split assignment for entries written without one
+                        datum['split'] = split_lookup.get(datum['file_path'], 'none')
+                    old_data.append(datum)
 
-            previously_handled = [datum['image'] for datum in old_data]
+            previously_handled = [datum.get('file_path', datum['image']) for datum in old_data]
 
             jsonl_data = []
 
@@ -225,7 +237,7 @@ class valve:
                     # Grab the label for the image
                     label = [int(datum) for datum in label_file.split('/')[-1].split('.png')[0].split('_')[2:]]
                     if len(label) == 3:
-                        label.append(None)
+                        label.append(-1)
                     label_image_number = extract_number(label_file)
 
                     if len(label_files) == label_ind + 1: # If there is no next image
@@ -241,7 +253,7 @@ class valve:
                     # Find core temp
                     temp_mask = (self.temps['site'] == label[0]) & (self.temps['column'] == label[1]) & (self.temps['core'] == label[2])
                     if temp_mask.any():
-                        core_temp = self.temps.loc[temp_mask, 'temperature'].iloc[0]
+                        core_temp = self.temps.loc[temp_mask, 'core_temperature'].iloc[0]
                     else:
                         core_temp = None
                     print(f"Temp mask for labels {label}: {temp_mask}")
@@ -274,7 +286,8 @@ class valve:
 
                             # Create metadata entry
                             new_entry = {
-                                'image': f"{data_dir}{image_filename}",
+                                'image': f"https://huggingface.co/datasets/RMDig/rocky_mountain_snowpack/resolve/main/{data_dir}{image_filename}",
+                                'file_path': f"{data_dir}{image_filename}",
                                 'datatype': data_dir.split('/')[-2][:-1],
                                 'site': label[0],
                                 'column': label[1],
@@ -315,28 +328,29 @@ class valve:
             # Append new data onto old
             jsonl_data = old_data + jsonl_data
 
+            train_data = []
+            test_data = []
+            validation_data = []
+            for ind in range(len(jsonl_data)):
+                split = jsonl_data[ind].pop('split', 'none')
+                
+                # Check if training data
+                if split == 'train':
+                    train_data.append(jsonl_data[ind])
+
+                # Check if test data
+                if split == 'test':
+                    test_data.append(jsonl_data[ind])
+
+                # Check if validation data
+                if split == 'validation':
+                    validation_data.append(jsonl_data[ind])
+
             # Construct filepath and write data
             metadata_path = f"{self.dataset_dir}metadata/{processing_state}.jsonl"
             with open(metadata_path, 'w') as f:
                 for entry in jsonl_data:
                     f.write(json.dumps(entry) + '\n')
-
-            train_data = []
-            test_data = []
-            validation_data = []
-            for ind in range(len(jsonl_data)):
-                
-                # Check if training data
-                if jsonl_data[ind]['split'] == 'train':
-                    train_data.append(jsonl_data[ind])
-
-                # Check if test data
-                if jsonl_data[ind]['split'] == 'test':
-                    test_data.append(jsonl_data[ind])
-
-                # Check if validation data
-                if jsonl_data[ind]['split'] == 'validation':
-                    validation_data.append(jsonl_data[ind])
 
         # Save data
         for dtype, data in zip(['train', 'test', 'validation'], [train_data, test_data, validation_data]):

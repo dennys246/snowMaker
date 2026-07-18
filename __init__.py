@@ -3,7 +3,7 @@ snowMaker
 
 Core pipeline for extracting data from the Rocky Mountain snowpack
 dataset hosting on hugging faces 
-(https://huggingface.co/datasets/dennys246/rocky_mountain_snowpack).
+(https://huggingface.co/datasets/RMDig/rocky_mountain_snowpack).
 
 Modules:
 - pipeline: Class for piping snowpack data
