@@ -285,7 +285,8 @@ class valve:
                             else:
                                 split = 'none'
 
-                            # Create metadata entry
+                            # Create metadata entry (cast pandas/numpy scalars to native
+                            # Python types so the entries stay JSON serializable)
                             new_entry = {
                                 'image': f"https://huggingface.co/datasets/RMDig/rocky_mountain_snowpack/resolve/main/{data_dir}{image_filename}",
                                 'file_path': f"{data_dir}{image_filename}",
@@ -294,21 +295,21 @@ class valve:
                                 'column': label[1],
                                 'core': label[2],
                                 'segment': label[3],
-                                'core_temperature': core_temp,
-                                'air_temperature': self.sites.loc[site_mask, 'air_temperature'].iloc[0],
-                                'ascending_mountain': self.sites.loc[site_mask, 'ascending_mountain'].iloc[0],
-                                'city_state_country': self.sites.loc[site_mask, 'city_state_country'].iloc[0],
-                                'collector': self.sites.loc[site_mask, 'collector'].iloc[0],
+                                'core_temperature': None if core_temp is None else float(core_temp),
+                                'air_temperature': float(self.sites.loc[site_mask, 'air_temperature'].iloc[0]),
+                                'ascending_mountain': str(self.sites.loc[site_mask, 'ascending_mountain'].iloc[0]),
+                                'city_state_country': str(self.sites.loc[site_mask, 'city_state_country'].iloc[0]),
+                                'collector': str(self.sites.loc[site_mask, 'collector'].iloc[0]),
                                 'coordinates': [float(coord) for coord in self.sites.loc[site_mask, 'coordinates'].iloc[0].split(', ')],
-                                'date': self.sites.loc[site_mask, 'date'].iloc[0],
-                                'time': self.sites.loc[site_mask, 'time'].iloc[0],
-                                'snowpack_depth': self.sites.loc[site_mask, 'snowpack_depth'].iloc[0],
+                                'date': str(self.sites.loc[site_mask, 'date'].iloc[0]),
+                                'time': str(self.sites.loc[site_mask, 'time'].iloc[0]),
+                                'snowpack_depth': float(self.sites.loc[site_mask, 'snowpack_depth'].iloc[0]),
                                 'core_depth': core_depth,
-                                'slope_face': self.sites.loc[site_mask, 'slope_face'].iloc[0],
-                                'slope_angle': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
+                                'slope_face': float(self.sites.loc[site_mask, 'slope_face'].iloc[0]),
+                                'slope_angle': float(self.sites.loc[site_mask, 'slope_gradient'].iloc[0]),
                                 'avalanches_spotted': int(self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0]),
-                                'wind_loading': self.sites.loc[site_mask, 'wind_loading'].iloc[0],
-                                'notes': self.sites.loc[site_mask, 'notes'].iloc[0],
+                                'wind_loading': str(self.sites.loc[site_mask, 'wind_loading'].iloc[0]),
+                                'notes': str(self.sites.loc[site_mask, 'notes'].iloc[0]),
                                 'split': split
                             }
 

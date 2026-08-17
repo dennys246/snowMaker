@@ -43,22 +43,36 @@ class colorSegmenter:
                     continue
 
             print(f"Image: {image.shape}")
-            color_mask = cv2.inRange(image, segment.lower_color, segment.upper_color) # Color mask
-            color_count = cv2.countNonZero(color_mask)
-            print(f"{color} count - {color_count}")
-            if color_count < 25000:
-                print(f"Color segmentation for {color} failed, skipping image {image_filename}...")
-                return None
 
-            if plot:# PLot mask
-                cv2.imshow("Mask", color_mask)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
+            if color == 'Green':
+                # The green frame is dark and weakly saturated — its apparent color swings from
+                # teal (shade) to olive (direct sun) and snow breaks its outline, so detecting it
+                # by color is unreliable. The red frame is vivid on every card; derive the label
+                # space from its corners instead.
+                data_space = self.estimate_label_space(corners[0], image)
+                print(f"Green corners estimated from red frame geometry:\n {data_space}")
+            else:
+                # Build the color mask in HSV space (hue isolates each frame color far more
+                # reliably than BGR boxes; red needs two ranges because its hue wraps around 0)
+                hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+                color_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+                for lower_color, upper_color in segment.hsv_ranges:
+                    color_mask = cv2.bitwise_or(color_mask, cv2.inRange(hsv, lower_color, upper_color))
+                color_count = cv2.countNonZero(color_mask)
+                print(f"{color} count - {color_count}")
+                if color_count < 25000:
+                    print(f"Color segmentation for {color} failed, skipping image {image_filename}...")
+                    return None
 
-            data_space = self.find_corners(color_mask, color, segment, corners, plot) # Find edges
-            print(f"Segment corners detected: {data_space}")
-            if data_space is None:
-                return None
+                if plot:# PLot mask
+                    cv2.imshow("Mask", color_mask)
+                    cv2.waitKey(0)
+                    cv2.destroyAllWindows()
+
+                data_space = self.find_corners(color_mask, color, segment, corners, plot) # Find edges
+                print(f"Segment corners detected: {data_space}")
+                if data_space is None:
+                    return None
 
             # Add data space to corners
             corners.append(data_space)
@@ -120,22 +134,70 @@ class colorSegmenter:
         else:
             heap = segment.heap(content=[]) # Initialize a min heap to store the points
 
+            # Close small breaks (snow on the frame, glare) so the ring reads as connected;
+            # kept small so nearby red features (the strip's red edge-line) don't merge in
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+            closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
             # Threshold to get binary image
-            _, thresh = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+            _, thresh = cv2.threshold(closed, 127, 255, cv2.THRESH_BINARY)
 
-            # Find contours
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # Find contours with hierarchy: the frame is a hollow ring, so prefer the outer
+            # contour enclosing the largest hole — a solid red blob elsewhere in the photo
+            # (clothing, gear) can out-area the frame but has no hole
+            contours, hierarchy = cv2.findContours(thresh, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+            if hierarchy is None or len(contours) == 0:
+                print("Skipping: No contours found.")
+                return None
+            chosen, best_hole = None, 0
+            for ind in range(len(contours)):
+                if hierarchy[0][ind][3] != -1:
+                    continue # Only consider outer contours, not the holes themselves
+                hole_area = 0
+                child = hierarchy[0][ind][2]
+                while child != -1:
+                    hole_area = max(hole_area, cv2.contourArea(contours[child]))
+                    child = hierarchy[0][child][0]
+                if hole_area > best_hole:
+                    chosen, best_hole = ind, hole_area
 
-            # Sort by area, take the largest
-            contour = max(contours, key=cv2.contourArea)
+            hole_thickness = None
+            if chosen is not None and best_hole >= 25000:
+                # Take corners from the ring's HOLE (the grid interior): red features touching
+                # the frame's outer edge (the strip's red edge-line, gear) can drag outer-hull
+                # corners away, but nothing can touch the hole. Corners get pushed back out by
+                # the frame thickness afterwards.
+                contour = contours[chosen]
+                hole, hole_area = None, 0
+                child = hierarchy[0][chosen][2]
+                while child != -1:
+                    if cv2.contourArea(contours[child]) > hole_area:
+                        hole, hole_area = child, cv2.contourArea(contours[child])
+                    child = hierarchy[0][child][0]
+                _, _, ow, oh = cv2.boundingRect(contour)
+                _, _, hw, hh = cv2.boundingRect(contours[hole])
+                # Attached slivers inflate one outer dimension, so trust the smaller estimate
+                hole_thickness = min((ow - hw) / 2, (oh - hh) / 2)
+                approx = cv2.convexHull(contours[hole])
+            else:
+                # No ring-like contour: fall back to the largest by area, merging back any
+                # frame fragments a break split off, and take corners from the outer hull
+                chosen = max(range(len(contours)), key=lambda ind: cv2.contourArea(contours[ind]))
+                contour = contours[chosen]
+                x, y, w, h = cv2.boundingRect(contour)
+                margin_x, margin_y = int(0.05 * w), int(0.05 * h)
+                pieces = [contour.reshape(-1, 2)]
+                for ind in range(len(contours)):
+                    if ind == chosen or hierarchy[0][ind][3] != -1 or cv2.contourArea(contours[ind]) < 2000:
+                        continue
+                    cx, cy, cw, ch = cv2.boundingRect(contours[ind])
+                    if cx > x - margin_x and cy > y - margin_y and cx + cw < x + w + margin_x and cy + ch < y + h + margin_y:
+                        pieces.append(contours[ind].reshape(-1, 2))
+                approx = cv2.convexHull(np.vstack(pieces))
 
-            # Approximate the contour to a polygon
-            epsilon = 0.02 * cv2.arcLength(contour, True)
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            
-            if approx is None or len(approx) == 0:
-                print("Skipping: No approximated contour.")
-                return None  # or return, pass, etc.
+            if approx is None or len(approx) < 4:
+                print("Skipping: No usable frame outline.")
+                return None
 
             # Find the centroid
             x_avg = 0
@@ -193,8 +255,19 @@ class colorSegmenter:
                     closest_points[0] = point
                 else:
                     ValueError("Point does not belong to any corner")
-                
-                
+
+            # A corner left at its zero placeholder means the search exhausted the heap
+            # without covering all four quadrants — fail instead of warping with garbage
+            if any(closest_points[row, 0] == 0 for row in range(4)):
+                print(f"Failed to find 4 valid corners for color {color}, aborting segmentation")
+                return None
+
+            if hole_thickness is not None:
+                # Corners came from the hole — push them outward to the frame's outer edge
+                for row in range(4):
+                    closest_points[row, 0] += hole_thickness if closest_points[row, 0] > x_avg else -hole_thickness
+                    closest_points[row, 1] += hole_thickness if closest_points[row, 1] > y_avg else -hole_thickness
+
         print(f"Closest points: {closest_points}")
 
         if plot:
@@ -214,6 +287,66 @@ class colorSegmenter:
             plt.show()
 
         return closest_points
+
+    def estimate_label_space(self, red_corners, image):
+        """
+        Estimate the green label space from the red frame corners. The label frame
+        sits directly below the red box, but its extent varies (~0.36-0.49 red
+        heights across cards), so the bottom edge is refined by walking down each
+        side and stopping just above where the blue board begins. If no blue is
+        found (board fully snow-covered) fall back to a generous 0.45.
+
+        Corner row order matches find_corners: 0 lower-left, 1 lower-right,
+        2 upper-right, 3 upper-left.
+        """
+        left_down = red_corners[0] - red_corners[3]   # red left edge, top to bottom
+        right_down = red_corners[1] - red_corners[2]  # red right edge, top to bottom
+
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        height, width = hsv.shape[:2]
+        steps = np.linspace(0.08, 0.55, 48)
+        step_size = steps[1] - steps[0]
+
+        def board_onset(origin, down):
+            """Walk down the frame's side bar until the board begins: either blue,
+            or — when snow hides the blue — a sustained bright (snow/card) run once
+            we are deep enough that it cannot be the label strip itself."""
+            run_blue = run_bright = 0
+            for t in steps:
+                x, y = (origin + t * down).astype(int)
+                if x < 4 or y < 4 or x >= width - 4 or y >= height - 4:
+                    break
+                patch = hsv[y-4:y+5, x-4:x+5].reshape(-1, 3)
+                med = np.median(patch, axis=0)
+                if 104 <= med[0] <= 133 and med[1] > 60 and med[2] > 40:
+                    run_blue += 1
+                    if run_blue >= 3: # Sustained blue - back off to just above where it started
+                        return t - 3 * step_size - 0.02
+                else:
+                    run_blue = 0
+                if med[2] > 190 and med[1] < 50:
+                    run_bright += 1
+                    if run_bright >= 5 and t - 5 * step_size >= 0.28:
+                        return t - 5 * step_size - 0.01
+                else:
+                    run_bright = 0
+            return None # Board not visible on this side
+
+        onsets = [board_onset(red_corners[0], left_down), board_onset(red_corners[1], right_down)]
+        found = [t for t in onsets if t is not None]
+        # Snow often hides the board on one side — borrow the measured side's depth
+        # rather than defaulting deep into the snow
+        default = float(np.median(found)) if found else 0.45
+        t_left = float(np.clip(onsets[0] if onsets[0] is not None else default, 0.28, 0.5))
+        t_right = float(np.clip(onsets[1] if onsets[1] is not None else default, 0.28, 0.5))
+
+        estimated_space = np.array([
+            red_corners[0] + t_left * left_down,    # lower left
+            red_corners[1] + t_right * right_down,  # lower right
+            red_corners[1],                         # upper right = red lower right
+            red_corners[0],                         # upper left = red lower left
+        ], dtype=np.float32)
+        return estimated_space
 
     def estimate_corners(self, corners):
 
@@ -248,10 +381,15 @@ class redSegment:
     def __init__(self):
         self.color = 'Red'
         self.size = (400, 500)
-        self.lower_color = np.array([0, 0, 30])
-        self.upper_color = np.array([59, 43, 195])
+        # Red hue wraps around 0, so two HSV ranges (measured H ~0-8 and ~160-179 on cards)
+        self.hsv_ranges = [
+            (np.array([0, 90, 50]), np.array([8, 255, 255])),
+            (np.array([160, 90, 50]), np.array([180, 255, 255])),
+        ]
 
-        self.heap = heaps.MinHeap
+        # Corners are the FARTHEST points from the contour centroid in each quadrant;
+        # a min heap let extra mid-edge vertices from approxPolyDP win over true corners
+        self.heap = heaps.MaxHeap
 
         self.output_dir = "preprocessed/profiles/"
 
@@ -288,8 +426,11 @@ class greenSegment:
     def __init__(self):
         self.color = 'Green'
         self.size = (200, 500)
-        self.lower_color = np.array([10, 10, 0])
-        self.upper_color = np.array([75, 75, 58])
+        # Dark teal-green frame: hue sits tightly at ~87-93, well below the grid/board
+        # blues at ~106-129; saturation floor rejects snow, shadow and the white strip
+        self.hsv_ranges = [
+            (np.array([82, 80, 25]), np.array([101, 255, 170])),
+        ]
 
         self.heap = heaps.MinHeap
 
@@ -335,8 +476,11 @@ class blueSegment:
     def __init__(self):
         self.color = 'Blue'
         self.size = (300, 500)
-        self.lower_color = np.array([65, 5, 2])
-        self.upper_color = np.array([160, 90, 36])
+        # Blue board (H ~113-129); the navy grid falls in range too, which is fine —
+        # blue corners are estimated from red/green and this mask only feeds the count check
+        self.hsv_ranges = [
+            (np.array([104, 40, 40]), np.array([133, 255, 220])),
+        ]
 
         self.heap = heaps.MaxHeap
 
