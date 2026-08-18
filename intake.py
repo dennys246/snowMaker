@@ -54,9 +54,6 @@ class valve:
         # Check if site has been processed
         site = int(site_folder.split('_')[-1].split('/')[0])
 
-        if site in self.sites['site'].values:
-            print(f"Site already intaken, canceling intake...")
-
         # Add intake parent folder if not specified
         if site_folder[:6] != 'intake':
             print(f"Parent folder intake/ not properly added, adding parent folder to path...")
@@ -70,40 +67,44 @@ class valve:
             print(f"Site folder {self.dataset_dir}{site_folder} not found...")
             return
         
-        # Grab site specific data
-        intake_site = pd.read_csv(f"{self.dataset_dir}{site_folder}site_logs.csv")
+        # Add site logs and temps unless already recorded in the master CSVs
+        if site in self.sites['site'].values:
+            print(f"Site {site} already in site logs, skipping site log and temperature intake...")
+        else:
+            # Grab site specific data
+            intake_site = pd.read_csv(f"{self.dataset_dir}{site_folder}site_logs.csv")
 
-        new_site = { # Create entry for site
-            'site': site,
-            'ascending_mountain': intake_site['ascending_mountain'][0],
-            'city_state_country': intake_site['city_state_country'][0],
-            'collector': intake_site['collector'][0],
-            'coordinates': intake_site['coordinates'][0],
-            'date': intake_site['date'][0],
-            'time': intake_site['time'][0],
-            'snowpack_depth': intake_site['snowpack_depth'][0],
-            'slope_face': intake_site['slope_face'][0],
-            'slope_gradient': intake_site['slope_gradient'][0],
-            'air_temperature': intake_site['air_temperature'][0],
-            'avalanches_spotted': intake_site['avalanches_spotted'][0],
-            'wind_loading': intake_site['wind_loading'][0],
-            'notes': intake_site['notes'][0],
-        }
-
-        self.sites = pd.concat([self.sites, pd.DataFrame([new_site])], ignore_index=True)
-
-        # Grab core data
-        intake_temps = pd.read_csv(f"{self.dataset_dir}{site_folder}site_temps.csv")
-        for record in intake_temps.iterrows():
-            new_temp = { # Create entry for core temperature
+            new_site = { # Create entry for site
                 'site': site,
-                'column': record[1]['column'],
-                'core': record[1]['core'],
-                'core_temperature': record[1]['core_temperature'],
+                'ascending_mountain': intake_site['ascending_mountain'][0],
+                'city_state_country': intake_site['city_state_country'][0],
+                'collector': intake_site['collector'][0],
+                'coordinates': intake_site['coordinates'][0],
+                'date': intake_site['date'][0],
+                'time': intake_site['time'][0],
+                'snowpack_depth': intake_site['snowpack_depth'][0],
+                'slope_face': intake_site['slope_face'][0],
+                'slope_gradient': intake_site['slope_gradient'][0],
+                'air_temperature': intake_site['air_temperature'][0],
+                'avalanches_spotted': intake_site['avalanches_spotted'][0],
+                'wind_loading': intake_site['wind_loading'][0],
+                'notes': intake_site['notes'][0],
             }
-            self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
-            
-        
+
+            self.sites = pd.concat([self.sites, pd.DataFrame([new_site])], ignore_index=True)
+
+            # Grab core data
+            intake_temps = pd.read_csv(f"{self.dataset_dir}{site_folder}site_temps.csv")
+            for record in intake_temps.iterrows():
+                new_temp = { # Create entry for core temperature
+                    'site': site,
+                    'column': record[1]['column'],
+                    'core': record[1]['core'],
+                    'core_temperature': record[1]['core_temperature'],
+                }
+                self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
+
+
         # Construct directory
         data_dir = f"{self.dataset_dir}{site_folder}/*/*"
 
@@ -185,6 +186,15 @@ class valve:
 
         extract_number = lambda filename : int(filename.split('image_')[1].split('_')[0].split('.png')[0])
 
+        # Recover previously assigned splits from the split metadata files
+        split_lookup = {}
+        for split_name in ['train', 'test', 'validation']:
+            split_path = f"{self.dataset_dir}metadata/{split_name}.jsonl"
+            if os.path.exists(split_path):
+                with open(split_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        split_lookup[json.loads(line)['file_path']] = split_name
+
         # Grab all label files
         label_files = glob(f"{self.dataset_dir}{label_dir}*")
 
@@ -202,9 +212,12 @@ class valve:
 
             with open(f"{self.dataset_dir}metadata/{processing_state}.jsonl", 'r', encoding='utf-8') as f:
                 for line in f:
-                    old_data.append(json.loads(line))
+                    datum = json.loads(line)
+                    if 'split' not in datum: # Restore split assignment for entries written without one
+                        datum['split'] = split_lookup.get(datum['file_path'], 'none')
+                    old_data.append(datum)
 
-            previously_handled = [datum['image'] for datum in old_data]
+            previously_handled = [datum.get('file_path', datum['image']) for datum in old_data]
 
             jsonl_data = []
 
@@ -225,7 +238,7 @@ class valve:
                     # Grab the label for the image
                     label = [int(datum) for datum in label_file.split('/')[-1].split('.png')[0].split('_')[2:]]
                     if len(label) == 3:
-                        label.append(None)
+                        label.append(-1)
                     label_image_number = extract_number(label_file)
 
                     if len(label_files) == label_ind + 1: # If there is no next image
@@ -241,7 +254,7 @@ class valve:
                     # Find core temp
                     temp_mask = (self.temps['site'] == label[0]) & (self.temps['column'] == label[1]) & (self.temps['core'] == label[2])
                     if temp_mask.any():
-                        core_temp = self.temps.loc[temp_mask, 'temperature'].iloc[0]
+                        core_temp = self.temps.loc[temp_mask, 'core_temperature'].iloc[0]
                     else:
                         core_temp = None
                     print(f"Temp mask for labels {label}: {temp_mask}")
@@ -272,29 +285,31 @@ class valve:
                             else:
                                 split = 'none'
 
-                            # Create metadata entry
+                            # Create metadata entry (cast pandas/numpy scalars to native
+                            # Python types so the entries stay JSON serializable)
                             new_entry = {
-                                'image': f"{data_dir}{image_filename}",
+                                'image': f"https://huggingface.co/datasets/RMDig/rocky_mountain_snowpack/resolve/main/{data_dir}{image_filename}",
+                                'file_path': f"{data_dir}{image_filename}",
                                 'datatype': data_dir.split('/')[-2][:-1],
                                 'site': label[0],
                                 'column': label[1],
                                 'core': label[2],
                                 'segment': label[3],
-                                'core_temperature': core_temp,
-                                'air_temperature': self.sites.loc[site_mask, 'air_temperature'].iloc[0],
-                                'ascending_mountain': self.sites.loc[site_mask, 'ascending_mountain'].iloc[0],
-                                'city_state_country': self.sites.loc[site_mask, 'city_state_country'].iloc[0],
-                                'collector': self.sites.loc[site_mask, 'collector'].iloc[0],
+                                'core_temperature': None if core_temp is None else float(core_temp),
+                                'air_temperature': float(self.sites.loc[site_mask, 'air_temperature'].iloc[0]),
+                                'ascending_mountain': str(self.sites.loc[site_mask, 'ascending_mountain'].iloc[0]),
+                                'city_state_country': str(self.sites.loc[site_mask, 'city_state_country'].iloc[0]),
+                                'collector': str(self.sites.loc[site_mask, 'collector'].iloc[0]),
                                 'coordinates': [float(coord) for coord in self.sites.loc[site_mask, 'coordinates'].iloc[0].split(', ')],
-                                'date': self.sites.loc[site_mask, 'date'].iloc[0],
-                                'time': self.sites.loc[site_mask, 'time'].iloc[0],
-                                'snowpack_depth': self.sites.loc[site_mask, 'snowpack_depth'].iloc[0],
+                                'date': str(self.sites.loc[site_mask, 'date'].iloc[0]),
+                                'time': str(self.sites.loc[site_mask, 'time'].iloc[0]),
+                                'snowpack_depth': float(self.sites.loc[site_mask, 'snowpack_depth'].iloc[0]),
                                 'core_depth': core_depth,
-                                'slope_face': self.sites.loc[site_mask, 'slope_face'].iloc[0],
-                                'slope_angle': self.sites.loc[site_mask, 'slope_gradient'].iloc[0],
+                                'slope_face': float(self.sites.loc[site_mask, 'slope_face'].iloc[0]),
+                                'slope_angle': float(self.sites.loc[site_mask, 'slope_gradient'].iloc[0]),
                                 'avalanches_spotted': int(self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0]),
-                                'wind_loading': self.sites.loc[site_mask, 'wind_loading'].iloc[0],
-                                'notes': self.sites.loc[site_mask, 'notes'].iloc[0],
+                                'wind_loading': str(self.sites.loc[site_mask, 'wind_loading'].iloc[0]),
+                                'notes': str(self.sites.loc[site_mask, 'notes'].iloc[0]),
                                 'split': split
                             }
 
@@ -315,28 +330,29 @@ class valve:
             # Append new data onto old
             jsonl_data = old_data + jsonl_data
 
+            train_data = []
+            test_data = []
+            validation_data = []
+            for ind in range(len(jsonl_data)):
+                split = jsonl_data[ind].pop('split', 'none')
+                
+                # Check if training data
+                if split == 'train':
+                    train_data.append(jsonl_data[ind])
+
+                # Check if test data
+                if split == 'test':
+                    test_data.append(jsonl_data[ind])
+
+                # Check if validation data
+                if split == 'validation':
+                    validation_data.append(jsonl_data[ind])
+
             # Construct filepath and write data
             metadata_path = f"{self.dataset_dir}metadata/{processing_state}.jsonl"
             with open(metadata_path, 'w') as f:
                 for entry in jsonl_data:
                     f.write(json.dumps(entry) + '\n')
-
-            train_data = []
-            test_data = []
-            validation_data = []
-            for ind in range(len(jsonl_data)):
-                
-                # Check if training data
-                if jsonl_data[ind]['split'] == 'train':
-                    train_data.append(jsonl_data[ind])
-
-                # Check if test data
-                if jsonl_data[ind]['split'] == 'test':
-                    test_data.append(jsonl_data[ind])
-
-                # Check if validation data
-                if jsonl_data[ind]['split'] == 'validation':
-                    validation_data.append(jsonl_data[ind])
 
         # Save data
         for dtype, data in zip(['train', 'test', 'validation'], [train_data, test_data, validation_data]):
