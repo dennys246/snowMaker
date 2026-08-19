@@ -1,0 +1,13 @@
+# Runtime dependencies for the intake and segmentation pipeline.
+pandas
+numpy
+matplotlib
+
+# segmenter.py uses cv2.imshow in its debug paths, so the GUI build is the
+# right choice on a workstation. Headless environments (CI) can substitute
+# opencv-python-headless -- same API, no GUI libraries.
+opencv-python
+
+# Publishing metadata and the dataset card to the Hugging Face Hub
+# (intake.upload_metadata). Imported lazily, so it is only needed to upload.
+huggingface_hub

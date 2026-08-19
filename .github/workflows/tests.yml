@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          # segmenter.py imports cv2 at module scope, and the GUI build needs
+          # libGL which a bare runner does not have. The headless build is the
+          # same API; the debug-only cv2.imshow paths are never hit by tests.
+          pip uninstall -y opencv-python
+          pip install opencv-python-headless
+
+      - name: Verify optional test dependencies are present
+        # tests/test_ect_roundtrip.py importorskips on datasets. If it were
+        # missing, the schema round-trip tests would skip and CI would still
+        # go green, which is the failure mode this step exists to prevent.
+        run: python -c "import datasets; print('datasets', datasets.__version__)"
+
+      - name: Run tests
+        run: python -m pytest -v --strict-markers
