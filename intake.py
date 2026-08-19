@@ -2,6 +2,147 @@ import os, cv2, atexit, json, random
 import pandas as pd
 from glob import glob
 from segmenter import colorSegmenter
+import ect
+
+
+# Coordinates are logged at whatever precision the receiver gives. Fewer than
+# this many decimal places is a box wide enough to straddle an elevation band,
+# which makes the DEM elevation lookup snowGradient does downstream unreliable.
+MIN_COORDINATE_DECIMALS = 4
+
+# Where the dataset is published
+HF_DATASET_REPO = "rmdig/rocky_mountain_snowpack"
+
+
+def read_jsonl(path):
+    """Read a JSONL metadata file into a list of dicts, preserving order."""
+    with open(path, 'r', encoding = 'utf-8') as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def fetch_hub_jsonl(api, repo_id, filename):
+    """
+    Read one metadata file from the Hub, or None if it is not there yet.
+
+    Arguments:
+        - api (HfApi) - Authenticated or anonymous Hub client
+        - repo_id (str) - Dataset repo to read from
+        - filename (str) - Path within the repo, e.g. 'metadata/raw.jsonl'
+    """
+    from huggingface_hub.errors import EntryNotFoundError
+
+    try:
+        local_copy = api.hf_hub_download(repo_id, filename, repo_type = "dataset")
+    except EntryNotFoundError:
+        return None
+    return read_jsonl(local_copy)
+
+
+def diff_metadata(local_rows, hub_rows):
+    """
+    Compare two metadata files by file_path.
+
+    Returns ``(added, removed)`` -- the file_paths this copy would add to the Hub
+    and the ones it would delete from it. A non-empty ``removed`` means the local
+    copy is missing rows the Hub already has, which is almost always a stale
+    working copy rather than an intended withdrawal.
+    """
+    local_paths = {row['file_path'] for row in local_rows}
+    if hub_rows is None:
+        return local_paths, set()
+    hub_paths = {row['file_path'] for row in hub_rows}
+    return local_paths - hub_paths, hub_paths - local_paths
+
+
+def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
+                    token = None, allow_shrink = False):
+    """
+    Upload the metadata files and dataset card to the Hugging Face dataset repo.
+
+    Only metadata/*.jsonl and README.md are sent. The images are already on the
+    Hub and are not touched, so this is a few megabytes rather than the ~96 GB the
+    full repo weighs.
+
+    Defaults to a dry run. Passing dry_run = False is the explicit confirmation to
+    write to the Hub.
+
+    Before uploading anything it checks the local copy against what is already
+    there and refuses to proceed if the Hub holds rows this copy does not, because
+    uploading would delete them. A stale working copy is the normal way that
+    happens -- on 2026-08-19 the working copy held sites 0-2 (2345 preprocessed
+    rows) while the Hub held sites 0-6 (4040), and an unguarded upload would have
+    dropped 1695 rows.
+
+    Arguments:
+        - dataset_dir (str) - Root of the dataset copy to upload from
+        - repo_id (str) - Hugging Face dataset repo to upload to
+        - dry_run (bool) - Report the plan without writing to the Hub
+        - token (str) - Hugging Face token, or None to use the ambient login
+        - allow_shrink (bool) - Upload even though it would remove rows from the
+          Hub. Only correct when rows are being deliberately withdrawn.
+    """
+    from huggingface_hub import HfApi
+
+    if not dataset_dir.endswith('/'):
+        dataset_dir += '/'
+
+    api = HfApi(token = token)
+
+    local_files = sorted(glob(f"{dataset_dir}metadata/*.jsonl"))
+    if not local_files:
+        raise FileNotFoundError(f"No metadata/*.jsonl found under {dataset_dir}")
+
+    print(f"Checking {len(local_files)} metadata file(s) against {repo_id}...")
+
+    shrinking = []
+    for local_path in local_files:
+        name = os.path.basename(local_path)
+        local_rows = read_jsonl(local_path)
+
+        # Never push a schema violation to the Hub
+        for position, entry in enumerate(local_rows):
+            ect.validate_ect(entry, context = f"{name} row {position}: ")
+        ect.validate_group_constancy(local_rows, context = f"{name}: ")
+
+        hub_rows = fetch_hub_jsonl(api, repo_id, f"metadata/{name}")
+        added, removed = diff_metadata(local_rows, hub_rows)
+
+        state = "not on Hub yet" if hub_rows is None else f"{len(hub_rows)} on Hub"
+        print(
+            f"  {name:<22} {len(local_rows):>6} row(s) local, {state:<16}"
+            f"  +{len(added)} / -{len(removed)}"
+        )
+        if removed:
+            shrinking.append((name, sorted(removed)))
+
+    if shrinking and not allow_shrink:
+        summary = "\n".join(
+            f"  {name}: {len(paths)} row(s) would be deleted, e.g. {paths[:3]}"
+            for name, paths in shrinking
+        )
+        raise RuntimeError(
+            f"Refusing to upload: the Hub holds rows this copy does not, so "
+            f"uploading would delete them.\n{summary}\n"
+            f"Re-sync this working copy from {repo_id} first. Pass "
+            f"allow_shrink = True only if the removal is intended."
+        )
+
+    if dry_run:
+        print(
+            f"\nDRY RUN -- nothing was uploaded. Re-run with dry_run = False to "
+            f"write metadata/*.jsonl and README.md to {repo_id}."
+        )
+        return
+
+    print(f"\nUploading metadata and dataset card to {repo_id}...")
+    api.upload_folder(
+        repo_id = repo_id,
+        repo_type = "dataset",
+        folder_path = dataset_dir,
+        allow_patterns = ["metadata/*.jsonl", "README.md"],
+        commit_message = "Add nullable ECT columns and document them in the card",
+    )
+    print("Upload complete.")
 
 
 class valve:
@@ -40,7 +181,108 @@ class valve:
         # Load temperature data
         self.temps = pd.read_csv(f"{self.dataset_dir}intake/site_temps.csv")
 
+        # Load extended column test data, one test per (site, column)
+        self.ects = self.load_ects()
+
         atexit.register(self.save_state)
+
+    def load_ects(self):
+        """
+        Load the master extended column test (ECT) records and validate them.
+
+        One ECT is run per snow column, so this table is at (site, column) grain
+        and every record is validated against the domain and cross-field rules in
+        the ect module before anything downstream sees it. A site that predates
+        the ECT schema simply has no row here, which reads as *not tested* --
+        distinct from an "X" result, which means the test ran and the column did
+        not fracture in 30 taps.
+        """
+        ect_path = f"{self.dataset_dir}intake/site_ects.csv"
+        columns = list(ect.ECT_GROUP_KEYS) + list(ect.ECT_COLUMNS)
+
+        if os.path.exists(ect_path):
+            ects = pd.read_csv(ect_path)
+            missing = [column for column in columns if column not in ects.columns]
+            if missing:
+                raise ect.ECTValidationError(
+                    f"{ect_path} is missing required columns {missing}"
+                )
+        else:
+            print(f"No ECT records found at {ect_path}, starting an empty ECT table...")
+            ects = pd.DataFrame(columns = columns)
+
+        self.build_ect_lookup(ects, source = ect_path)
+        return ects
+
+    def build_ect_lookup(self, ects, source):
+        """
+        Validate every ECT record and index it by (site, column).
+
+        Arguments:
+            - ects (DataFrame) - ECT records at (site, column) grain
+            - source (str) - Where the records came from, for error messages
+        """
+        records = []
+        for position, record in ects.iterrows():
+            context = f"{source} row {position} (site {record['site']}, column {record['column']}): "
+            values = ect.normalize_ect(record, context)
+            values.update({key: record[key] for key in ect.ECT_GROUP_KEYS})
+            records.append(values)
+
+        # Raises loudly rather than letting the first value win
+        ect.validate_group_constancy(records, context = f"{source}: ")
+
+        self.ect_lookup = {}
+        for values in records:
+            key = (int(values['site']), int(values['column']))
+            self.ect_lookup[key] = {column: values[column] for column in ect.ECT_COLUMNS}
+        return self.ect_lookup
+
+    def ect_for(self, site, column):
+        """
+        Look up the ECT record for a snow column, or all-null if it was not tested.
+
+        Arguments:
+            - site (int) - Site number
+            - column (int) - Snow column number within the site
+        """
+        return dict(self.ect_lookup.get((int(site), int(column)), ect.null_ect()))
+
+    def parse_coordinates(self, raw, site):
+        """
+        Parse a 'latitude, longitude' pair at the full precision it was recorded at.
+
+        Nothing here rounds or truncates -- whatever precision the receiver gave is
+        what gets logged. Site 0 was recorded as [39.66, -105.88]; two decimal
+        places is a ~1.1 km box, and in Loveland Pass terrain that box spans
+        3533-3748 m and straddles an elevation-band boundary, so a DEM elevation
+        lookup against it cannot be trusted. Low precision warns rather than raises
+        so historical sites still load.
+
+        Elevation deliberately has no column of its own: it is recoverable from the
+        GPS fix via a DEM (USGS 3DEP), which snowGradient already does. Aspect is
+        not recoverable that way, which is why slope_face is carried explicitly.
+
+        Arguments:
+            - raw (str) - Coordinate string from the site log
+            - site (int) - Site number, for the warning message
+        """
+        parts = [part.strip() for part in str(raw).split(',') if part.strip()]
+        if len(parts) != 2:
+            raise ValueError(
+                f"Site {site} coordinates {raw!r} are not a 'latitude, longitude' pair"
+            )
+
+        for label, part in zip(('latitude', 'longitude'), parts):
+            decimals = len(part.partition('.')[2])
+            if decimals < MIN_COORDINATE_DECIMALS:
+                print(
+                    f"WARNING: site {site} {label} {part} carries only {decimals} decimal "
+                    f"place(s); {MIN_COORDINATE_DECIMALS} are needed to place the pit "
+                    f"within an elevation band. Log the receiver's full precision."
+                )
+
+        return [float(part) for part in parts]
 
     def intake(self, site_folder):
         """
@@ -103,6 +345,22 @@ class valve:
                     'core_temperature': record[1]['core_temperature'],
                 }
                 self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
+
+            # Grab extended column test data, one test per snow column. Sites dug
+            # before the ECT protocol have no such file; that stays null (not
+            # tested) rather than becoming an "X" (tested, no fracture).
+            intake_ect_path = f"{self.dataset_dir}{site_folder}site_ects.csv"
+            if os.path.exists(intake_ect_path):
+                intake_ects = pd.read_csv(intake_ect_path)
+                for position, record in intake_ects.iterrows():
+                    context = f"{intake_ect_path} row {position}: "
+                    values = ect.normalize_ect(record, context)
+                    values.update({'site': site, 'column': record['column']})
+                    self.ects = pd.concat([self.ects, pd.DataFrame([values])], ignore_index=True)
+                self.build_ect_lookup(self.ects, source = "intake/site_ects.csv")
+                print(f"Recorded {len(intake_ects)} ECT(s) for site {site}...")
+            else:
+                print(f"No ECT records found for site {site}, leaving ECT columns null...")
 
 
         # Construct directory
@@ -215,6 +473,10 @@ class valve:
                     datum = json.loads(line)
                     if 'split' not in datum: # Restore split assignment for entries written without one
                         datum['split'] = split_lookup.get(datum['file_path'], 'none')
+                    # Rows written before the ECT schema get null across all seven
+                    # columns, meaning *not tested*. Values already present are left
+                    # alone, so this is safe on a re-run.
+                    ect.backfill_row(datum)
                     old_data.append(datum)
 
             previously_handled = [datum.get('file_path', datum['image']) for datum in old_data]
@@ -259,6 +521,11 @@ class valve:
                         core_temp = None
                     print(f"Temp mask for labels {label}: {temp_mask}")
 
+                    # Find the extended column test for this snow column. One ECT
+                    # per column, so every row of this (site, column) carries the
+                    # same seven values.
+                    ect_values = self.ect_for(label[0], label[1])
+
                     # Iterate through all files
                     for image_filepath in datatype_images:
                         image_filename = os.path.basename(image_filepath)
@@ -300,7 +567,7 @@ class valve:
                                 'ascending_mountain': str(self.sites.loc[site_mask, 'ascending_mountain'].iloc[0]),
                                 'city_state_country': str(self.sites.loc[site_mask, 'city_state_country'].iloc[0]),
                                 'collector': str(self.sites.loc[site_mask, 'collector'].iloc[0]),
-                                'coordinates': [float(coord) for coord in self.sites.loc[site_mask, 'coordinates'].iloc[0].split(', ')],
+                                'coordinates': self.parse_coordinates(self.sites.loc[site_mask, 'coordinates'].iloc[0], label[0]),
                                 'date': str(self.sites.loc[site_mask, 'date'].iloc[0]),
                                 'time': str(self.sites.loc[site_mask, 'time'].iloc[0]),
                                 'snowpack_depth': float(self.sites.loc[site_mask, 'snowpack_depth'].iloc[0]),
@@ -310,6 +577,7 @@ class valve:
                                 'avalanches_spotted': int(self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0]),
                                 'wind_loading': str(self.sites.loc[site_mask, 'wind_loading'].iloc[0]),
                                 'notes': str(self.sites.loc[site_mask, 'notes'].iloc[0]),
+                                **ect_values,
                                 'split': split
                             }
 
@@ -329,6 +597,12 @@ class valve:
             
             # Append new data onto old
             jsonl_data = old_data + jsonl_data
+
+            # Re-check the schema over everything about to be written, so a bad
+            # record fails here rather than silently reaching the Hub
+            for position, entry in enumerate(jsonl_data):
+                ect.validate_ect(entry, context = f"{processing_state}.jsonl entry {position}: ")
+            ect.validate_group_constancy(jsonl_data, context = f"{processing_state}.jsonl: ")
 
             train_data = []
             test_data = []
@@ -368,10 +642,21 @@ class valve:
         in case of catastrophy.
         """
 
-    def upload_huggingface(self):
+    def upload_huggingface(self, repo_id = HF_DATASET_REPO, dry_run = True,
+                           token = None, allow_shrink = False):
         """
-        Upload new data to hugging face repository
+        Upload this dataset's metadata and card to the Hugging Face dataset repo.
+
+        Thin wrapper around upload_metadata, which does the work and can also be
+        called without a valve. See that function for the pre-flight behaviour.
         """
+        return upload_metadata(
+            self.dataset_dir,
+            repo_id = repo_id,
+            dry_run = dry_run,
+            token = token,
+            allow_shrink = allow_shrink,
+        )
 
     def save_state(self):
         """
@@ -382,7 +667,10 @@ class valve:
         # Save site data
         self.sites.to_csv(f"{self.dataset_dir}intake/site_logs.csv", index = False)
 
-        # Load temperature data
+        # Save temperature data
         self.temps.to_csv(f"{self.dataset_dir}intake/site_temps.csv", index = False)
+
+        # Save extended column test data
+        self.ects.to_csv(f"{self.dataset_dir}intake/site_ects.csv", index = False)
 
         print(f"Intake records saved...")

@@ -1,7 +1,6 @@
 import cv2, os, heaps
 import numpy as np
 import matplotlib.pyplot as plt
-import tensorflow as tf
 from glob import glob
 
 class colorSegmenter:

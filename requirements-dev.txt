@@ -1,0 +1,9 @@
+-r requirements.txt
+
+pytest
+
+# Required by tests/test_ect_roundtrip.py, which asserts that load_dataset()
+# and a direct JSONL read agree on the ECT columns. Those tests importorskip
+# on this, so without it they SKIP rather than fail and a green run would not
+# actually cover the schema. CI checks it is importable before running.
+datasets>=2.14
