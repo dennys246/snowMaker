@@ -1,23 +1,54 @@
-import os, cv2, atexit, json, random
+import os, cv2, atexit, json
 import pandas as pd
 from glob import glob
 from segmenter import colorSegmenter
-import ect
+import schema
+import pits, layers, cores, ect
 
 
-# Coordinates are logged at whatever precision the receiver gives. Fewer than
-# this many decimal places is a box wide enough to straddle an elevation band,
-# which makes the DEM elevation lookup snowGradient does downstream unreliable.
-MIN_COORDINATE_DECIMALS = 4
+# The side tables, in the order they are validated and written. Each is one grain:
+# pits (site-day), layers (site, column, layer_index), cores (site, column, core),
+# ect (site, column, test_index, fracture_index).
+SIDE_TABLES = (pits.SPEC, layers.SPEC, cores.SPEC, ect.SPEC)
+
+# The image-table files. Both carry the same columns; 'raw' holds the source
+# photographs and 'preprocessed' the segmented ones.
+IMAGE_TABLES = ('raw', 'preprocessed')
 
 # Where the dataset is published
 HF_DATASET_REPO = "rmdig/rocky_mountain_snowpack"
 
 
+def side_table_csv(spec):
+    """Intake CSV filename for a side table: site_pits.csv, site_layers.csv, ..."""
+    return f"site_{spec.name}.csv"
+
+
 def read_jsonl(path):
     """Read a JSONL metadata file into a list of dicts, preserving order."""
-    with open(path, 'r', encoding = 'utf-8') as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+    return schema.read_jsonl(path)
+
+
+def strip_legacy_ect(entry, context = ""):
+    """
+    Remove the seven ect_* columns the image table carried until 2026-08-25.
+
+    They were null on every published row. A non-null value here would be a real
+    test recorded against the old (site, column) grain, which cannot be moved to
+    ect.jsonl automatically because the new grain needs test_index and
+    fracture_index -- so that raises rather than being dropped.
+    """
+    for column in ect.LEGACY_IMAGE_COLUMNS:
+        if column not in entry:
+            continue
+        if entry[column] is not None:
+            raise schema.SchemaError(
+                f"{context}{column}={entry[column]!r} on an image row. ECT values "
+                f"live in metadata/ect.jsonl now; move this test there by hand "
+                f"(see docs/SCHEMA_V2.md) before re-running."
+            )
+        del entry[column]
+    return entry
 
 
 def fetch_hub_jsonl(api, repo_id, filename):
@@ -38,24 +69,80 @@ def fetch_hub_jsonl(api, repo_id, filename):
     return read_jsonl(local_copy)
 
 
-def diff_metadata(local_rows, hub_rows):
+def diff_metadata(local_rows, hub_rows, key = None):
     """
-    Compare two metadata files by file_path.
+    Compare two metadata files by row identity.
 
-    Returns ``(added, removed)`` -- the file_paths this copy would add to the Hub
-    and the ones it would delete from it. A non-empty ``removed`` means the local
-    copy is missing rows the Hub already has, which is almost always a stale
-    working copy rather than an intended withdrawal.
+    Image tables are identified by file_path; a side table by its key columns
+    (pass ``key`` as the tuple of column names). Returns ``(added, removed)`` --
+    the identities this copy would add to the Hub and the ones it would delete
+    from it. A non-empty ``removed`` means the local copy is missing rows the Hub
+    already has, which is almost always a stale working copy rather than an
+    intended withdrawal.
     """
-    local_paths = {row['file_path'] for row in local_rows}
+    def identity(row):
+        if key is None:
+            return row['file_path']
+        return tuple(row[k] for k in key)
+
+    local_ids = {identity(row) for row in local_rows}
     if hub_rows is None:
-        return local_paths, set()
-    hub_paths = {row['file_path'] for row in hub_rows}
-    return local_paths - hub_paths, hub_paths - local_paths
+        return local_ids, set()
+    hub_ids = {identity(row) for row in hub_rows}
+    return local_ids - hub_ids, hub_ids - local_ids
+
+
+def validate_metadata_dir(dataset_dir):
+    """
+    Validate every metadata table under ``dataset_dir`` and the links between them.
+
+    Returns ``{name: rows}`` for every file present. Raises SchemaError on any
+    violation, so nothing invalid can be uploaded. Prints warnings.
+    """
+    if not dataset_dir.endswith('/'):
+        dataset_dir += '/'
+
+    tables = {}
+    image_rows = []
+    for name in IMAGE_TABLES:
+        path = f"{dataset_dir}metadata/{name}.jsonl"
+        if os.path.exists(path):
+            rows = read_jsonl(path)
+            for position, entry in enumerate(rows):
+                leftover = [c for c in ect.LEGACY_IMAGE_COLUMNS if c in entry]
+                if leftover:
+                    raise schema.SchemaError(
+                        f"{name}.jsonl row {position} still carries {leftover}; run "
+                        f"scripts/migrate_side_tables.py to move the ECT columns off "
+                        f"the image table"
+                    )
+            tables[name] = rows
+            image_rows.extend(rows)
+
+    warnings = []
+    for spec in SIDE_TABLES:
+        path = f"{dataset_dir}metadata/{spec.name}.jsonl"
+        if not os.path.exists(path):
+            raise schema.SchemaError(
+                f"{path} is missing; run scripts/migrate_side_tables.py to create the "
+                f"side tables"
+            )
+        rows = read_jsonl(path)
+        warnings.extend(spec.validate_table(rows, context = f"{spec.name}.jsonl: "))
+        tables[spec.name] = rows
+
+    warnings.extend(schema.validate_dataset(
+        {spec.name: tables[spec.name] for spec in SIDE_TABLES},
+        image_rows = image_rows or None,
+        context = "metadata/: ",
+    ))
+    for warning in warnings:
+        print(f"WARNING: {warning}")
+    return tables
 
 
 def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
-                    token = None, allow_shrink = False):
+                    token = None, allow_shrink = False, commit_message = None):
     """
     Upload the metadata files and dataset card to the Hugging Face dataset repo.
 
@@ -66,12 +153,12 @@ def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
     Defaults to a dry run. Passing dry_run = False is the explicit confirmation to
     write to the Hub.
 
-    Before uploading anything it checks the local copy against what is already
-    there and refuses to proceed if the Hub holds rows this copy does not, because
-    uploading would delete them. A stale working copy is the normal way that
-    happens -- on 2026-08-19 the working copy held sites 0-2 (2345 preprocessed
-    rows) while the Hub held sites 0-6 (4040), and an unguarded upload would have
-    dropped 1695 rows.
+    Before uploading anything it validates every table, then checks the local copy
+    against what is already there and refuses to proceed if the Hub holds rows this
+    copy does not, because uploading would delete them. A stale working copy is the
+    normal way that happens -- on 2026-08-19 the working copy held sites 0-2 (2345
+    preprocessed rows) while the Hub held sites 0-6 (4040), and an unguarded upload
+    would have dropped 1695 rows.
 
     Arguments:
         - dataset_dir (str) - Root of the dataset copy to upload from
@@ -80,6 +167,7 @@ def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
         - token (str) - Hugging Face token, or None to use the ambient login
         - allow_shrink (bool) - Upload even though it would remove rows from the
           Hub. Only correct when rows are being deliberately withdrawn.
+        - commit_message (str) - Commit message on the Hub
     """
     from huggingface_hub import HfApi
 
@@ -88,37 +176,30 @@ def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
 
     api = HfApi(token = token)
 
-    local_files = sorted(glob(f"{dataset_dir}metadata/*.jsonl"))
-    if not local_files:
-        raise FileNotFoundError(f"No metadata/*.jsonl found under {dataset_dir}")
+    # Never push a schema violation to the Hub
+    tables = validate_metadata_dir(dataset_dir)
+    keys = {spec.name: spec.key for spec in SIDE_TABLES}
 
-    print(f"Checking {len(local_files)} metadata file(s) against {repo_id}...")
+    print(f"Checking {len(tables)} metadata file(s) against {repo_id}...")
 
     shrinking = []
-    for local_path in local_files:
-        name = os.path.basename(local_path)
-        local_rows = read_jsonl(local_path)
-
-        # Never push a schema violation to the Hub
-        for position, entry in enumerate(local_rows):
-            ect.validate_ect(entry, context = f"{name} row {position}: ")
-        ect.validate_group_constancy(local_rows, context = f"{name}: ")
-
-        hub_rows = fetch_hub_jsonl(api, repo_id, f"metadata/{name}")
-        added, removed = diff_metadata(local_rows, hub_rows)
+    for name, local_rows in tables.items():
+        filename = f"{name}.jsonl"
+        hub_rows = fetch_hub_jsonl(api, repo_id, f"metadata/{filename}")
+        added, removed = diff_metadata(local_rows, hub_rows, key = keys.get(name))
 
         state = "not on Hub yet" if hub_rows is None else f"{len(hub_rows)} on Hub"
         print(
-            f"  {name:<22} {len(local_rows):>6} row(s) local, {state:<16}"
+            f"  {filename:<22} {len(local_rows):>6} row(s) local, {state:<16}"
             f"  +{len(added)} / -{len(removed)}"
         )
         if removed:
-            shrinking.append((name, sorted(removed)))
+            shrinking.append((filename, sorted(removed, key = repr)))
 
     if shrinking and not allow_shrink:
         summary = "\n".join(
-            f"  {name}: {len(paths)} row(s) would be deleted, e.g. {paths[:3]}"
-            for name, paths in shrinking
+            f"  {name}: {len(ids)} row(s) would be deleted, e.g. {ids[:3]}"
+            for name, ids in shrinking
         )
         raise RuntimeError(
             f"Refusing to upload: the Hub holds rows this copy does not, so "
@@ -140,7 +221,7 @@ def upload_metadata(dataset_dir, repo_id = HF_DATASET_REPO, dry_run = True,
         repo_type = "dataset",
         folder_path = dataset_dir,
         allow_patterns = ["metadata/*.jsonl", "README.md"],
-        commit_message = "Add nullable ECT columns and document them in the card",
+        commit_message = commit_message or "Update metadata tables and dataset card",
     )
     print("Upload complete.")
 
@@ -154,8 +235,11 @@ class valve:
         - dataset_dir (str) - Directory storing the Rocky Mountain snowpack dataset
 
     Class Functions:
-        - orient() - Orients the intake valve to the current state of the folder
-        - segment() - 
+        - intake() - Copy a site's photographs and field records into the dataset
+        - segment_cards() - Segment crystal card images
+        - update_metadata() - Write the image table and side tables from labels
+        - upload_huggingface() - Push metadata and the card to the Hub
+        - save_state() - Save the intake bookkeeping CSVs
 
     """
     def __init__(self, dataset_dir):
@@ -163,9 +247,6 @@ class valve:
         self.dataset_dir = dataset_dir
         if self.dataset_dir[-1] != '/':
             self.dataset_dir += '/'
-
-        # Orient to the dataset dir
-        self.sites = glob(f"{self.dataset_dir}intake/site*/")
 
         # Grab all raw images already intaken
         self.raw_images = glob(f"{self.dataset_dir}raw/magnified_profiles/*") + glob(f"{self.dataset_dir}raw/crystal_cards/*")
@@ -181,72 +262,81 @@ class valve:
         # Load temperature data
         self.temps = pd.read_csv(f"{self.dataset_dir}intake/site_temps.csv")
 
-        # Load extended column test data, one test per (site, column)
-        self.ects = self.load_ects()
+        # Load the side tables collected under the field protocol: pits, layer
+        # profiles, cores and extended column tests. Each is validated on load.
+        self.side_tables = {spec.name: self.load_side_table(spec) for spec in SIDE_TABLES}
 
         atexit.register(self.save_state)
 
-    def load_ects(self):
+    def load_side_table(self, spec):
         """
-        Load the master extended column test (ECT) records and validate them.
+        Load one master side-table CSV from intake/ and validate it.
 
-        One ECT is run per snow column, so this table is at (site, column) grain
-        and every record is validated against the domain and cross-field rules in
-        the ect module before anything downstream sees it. A site that predates
-        the ECT schema simply has no row here, which reads as *not tested* --
-        distinct from an "X" result, which means the test ran and the column did
-        not fracture in 30 taps.
-        """
-        ect_path = f"{self.dataset_dir}intake/site_ects.csv"
-        columns = list(ect.ECT_GROUP_KEYS) + list(ect.ECT_COLUMNS)
-
-        if os.path.exists(ect_path):
-            ects = pd.read_csv(ect_path)
-            missing = [column for column in columns if column not in ects.columns]
-            if missing:
-                raise ect.ECTValidationError(
-                    f"{ect_path} is missing required columns {missing}"
-                )
-        else:
-            print(f"No ECT records found at {ect_path}, starting an empty ECT table...")
-            ects = pd.DataFrame(columns = columns)
-
-        self.build_ect_lookup(ects, source = ect_path)
-        return ects
-
-    def build_ect_lookup(self, ects, source):
-        """
-        Validate every ECT record and index it by (site, column).
+        A site collected before the field protocol simply has no rows here. For
+        the ECT table that reads as *not tested*, which is distinct from an "X"
+        result (tested, no fracture in 30 taps).
 
         Arguments:
-            - ects (DataFrame) - ECT records at (site, column) grain
-            - source (str) - Where the records came from, for error messages
+            - spec (schema.TableSpec) - Which table to load
         """
-        records = []
-        for position, record in ects.iterrows():
-            context = f"{source} row {position} (site {record['site']}, column {record['column']}): "
-            values = ect.normalize_ect(record, context)
-            values.update({key: record[key] for key in ect.ECT_GROUP_KEYS})
-            records.append(values)
+        path = f"{self.dataset_dir}intake/{side_table_csv(spec)}"
+        if not os.path.exists(path):
+            print(f"No {spec.name} records found at {path}, starting an empty {spec.name} table...")
+            return []
+        warnings = []
+        records = schema.read_csv(spec, path, warnings = warnings)
+        warnings.extend(spec.validate_table(records, context = f"{path}: "))
+        for warning in warnings:
+            print(f"WARNING: {warning}")
+        print(f"Loaded {len(records)} {spec.name} record(s) from {path}")
+        return records
 
-        # Raises loudly rather than letting the first value win
-        ect.validate_group_constancy(records, context = f"{source}: ")
-
-        self.ect_lookup = {}
-        for values in records:
-            key = (int(values['site']), int(values['column']))
-            self.ect_lookup[key] = {column: values[column] for column in ect.ECT_COLUMNS}
-        return self.ect_lookup
-
-    def ect_for(self, site, column):
+    def intake_side_table(self, spec, site, site_folder):
         """
-        Look up the ECT record for a snow column, or all-null if it was not tested.
+        Read one side-table CSV from a site's intake folder and add it to the master.
+
+        The CSV's site column, if present, must match the folder; if absent it is
+        filled from the folder. Duplicate keys and any schema violation raise.
 
         Arguments:
-            - site (int) - Site number
-            - column (int) - Snow column number within the site
+            - spec (schema.TableSpec) - Which table
+            - site (int) - Site number from the folder name
+            - site_folder (str) - Site intake folder, relative to dataset_dir
         """
-        return dict(self.ect_lookup.get((int(site), int(column)), ect.null_ect()))
+        path = f"{self.dataset_dir}{site_folder}{side_table_csv(spec)}"
+        if not os.path.exists(path):
+            print(f"No {side_table_csv(spec)} for site {site}, leaving {spec.name} empty for it...")
+            return
+
+        if any(record['site'] == site for record in self.side_tables[spec.name]):
+            print(f"Site {site} already in the {spec.name} table, skipping {side_table_csv(spec)}...")
+            return
+
+        # Fill or check the site column before coercion, using the raw cells
+        import csv
+        raw_rows = []
+        with open(path, 'r', encoding = 'utf-8-sig', newline = '') as handle:
+            for raw in csv.DictReader(handle):
+                recorded = raw.get('site')
+                if schema.is_null(recorded):
+                    raw['site'] = str(site)
+                elif str(recorded).strip() != str(site):
+                    raise schema.SchemaError(
+                        f"{path}: site column says {recorded!r} but the folder is site {site}"
+                    )
+                raw_rows.append(raw)
+
+        warnings = []
+        records = [
+            spec.normalize(raw, f"{path} row {position + 1}: ", warnings)
+            for position, raw in enumerate(raw_rows)
+        ]
+        merged = schema.merge_records(spec, self.side_tables[spec.name], records, context = f"{path}: ")
+        warnings.extend(spec.validate_table(merged, context = f"{path}: "))
+        for warning in warnings:
+            print(f"WARNING: {warning}")
+        self.side_tables[spec.name] = merged
+        print(f"Recorded {len(records)} {spec.name} record(s) for site {site}...")
 
     def parse_coordinates(self, raw, site):
         """
@@ -260,29 +350,27 @@ class valve:
         so historical sites still load.
 
         Elevation deliberately has no column of its own: it is recoverable from the
-        GPS fix via a DEM (USGS 3DEP), which snowGradient already does. Aspect is
-        not recoverable that way, which is why slope_face is carried explicitly.
+        GPS fix via a DEM (USGS 3DEP). Aspect is not recoverable that way, which is
+        why it is carried explicitly (pits.aspect_deg_true, legacy slope_face).
 
         Arguments:
             - raw (str) - Coordinate string from the site log
             - site (int) - Site number, for the warning message
         """
-        parts = [part.strip() for part in str(raw).split(',') if part.strip()]
-        if len(parts) != 2:
-            raise ValueError(
-                f"Site {site} coordinates {raw!r} are not a 'latitude, longitude' pair"
+        warnings = []
+        try:
+            coordinates = schema.coerce_value(
+                pits.SPEC.by_name['coordinates'], raw, f"site {site} ", warnings
             )
-
-        for label, part in zip(('latitude', 'longitude'), parts):
-            decimals = len(part.partition('.')[2])
-            if decimals < MIN_COORDINATE_DECIMALS:
-                print(
-                    f"WARNING: site {site} {label} {part} carries only {decimals} decimal "
-                    f"place(s); {MIN_COORDINATE_DECIMALS} are needed to place the pit "
-                    f"within an elevation band. Log the receiver's full precision."
-                )
-
-        return [float(part) for part in parts]
+        except schema.SchemaError as error:
+            raise ValueError(
+                f"Site {site} coordinates {raw!r} are not a 'latitude, longitude' pair: {error}"
+            ) from None
+        if coordinates is None:
+            raise ValueError(f"Site {site} has no coordinates")
+        for warning in warnings:
+            print(f"WARNING: {warning}")
+        return coordinates
 
     def intake(self, site_folder):
         """
@@ -346,21 +434,11 @@ class valve:
                 }
                 self.temps = pd.concat([self.temps, pd.DataFrame([new_temp])], ignore_index=True)
 
-            # Grab extended column test data, one test per snow column. Sites dug
-            # before the ECT protocol have no such file; that stays null (not
-            # tested) rather than becoming an "X" (tested, no fracture).
-            intake_ect_path = f"{self.dataset_dir}{site_folder}site_ects.csv"
-            if os.path.exists(intake_ect_path):
-                intake_ects = pd.read_csv(intake_ect_path)
-                for position, record in intake_ects.iterrows():
-                    context = f"{intake_ect_path} row {position}: "
-                    values = ect.normalize_ect(record, context)
-                    values.update({'site': site, 'column': record['column']})
-                    self.ects = pd.concat([self.ects, pd.DataFrame([values])], ignore_index=True)
-                self.build_ect_lookup(self.ects, source = "intake/site_ects.csv")
-                print(f"Recorded {len(intake_ects)} ECT(s) for site {site}...")
-            else:
-                print(f"No ECT records found for site {site}, leaving ECT columns null...")
+        # Grab the field-protocol tables: site_pits.csv, site_layers.csv,
+        # site_cores.csv, site_ect.csv. A site dug before the protocol has none of
+        # them; its side-table rows stay absent (not measured), never placeholders.
+        for spec in SIDE_TABLES:
+            self.intake_side_table(spec, site, site_folder)
 
 
         # Construct directory
@@ -434,7 +512,11 @@ class valve:
     def update_metadata(self):
         """
         Update metadata from manually labeled crystal card segments and copy labels
-        back to the intake folder for archiving
+        back to the intake folder for archiving.
+
+        Writes the two image tables (raw.jsonl, preprocessed.jsonl) and then the
+        four side tables (pits, layers, cores, ect), checking the links between
+        them before anything is written.
         """
 
         # Define runtime parameters
@@ -443,15 +525,6 @@ class valve:
         raw_dirs = ['raw/crystal_cards/', 'raw/magnified_profiles/']
 
         extract_number = lambda filename : int(filename.split('image_')[1].split('_')[0].split('.png')[0])
-
-        # Recover previously assigned splits from the split metadata files
-        split_lookup = {}
-        for split_name in ['train', 'test', 'validation']:
-            split_path = f"{self.dataset_dir}metadata/{split_name}.jsonl"
-            if os.path.exists(split_path):
-                with open(split_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        split_lookup[json.loads(line)['file_path']] = split_name
 
         # Grab all label files
         label_files = glob(f"{self.dataset_dir}{label_dir}*")
@@ -464,19 +537,19 @@ class valve:
         zipper = sorted(zip(filenumbers, label_files))
         filenumbers, label_files = zip(*zipper)
 
+        image_tables = {}
+
         # Iterate through preprocessing states
         for data_dirs, processing_state in zip([raw_dirs, preproc_dirs], ['raw', 'preprocessed']):
             old_data = []
 
             with open(f"{self.dataset_dir}metadata/{processing_state}.jsonl", 'r', encoding='utf-8') as f:
-                for line in f:
+                for position, line in enumerate(f):
                     datum = json.loads(line)
-                    if 'split' not in datum: # Restore split assignment for entries written without one
-                        datum['split'] = split_lookup.get(datum['file_path'], 'none')
-                    # Rows written before the ECT schema get null across all seven
-                    # columns, meaning *not tested*. Values already present are left
-                    # alone, so this is safe on a re-run.
-                    ect.backfill_row(datum)
+                    datum.pop('split', None)  # row-level splits were dropped on 2026-08-19
+                    # Rows written before 2026-08-25 carried the seven ect_* columns,
+                    # null on every row. They live in ect.jsonl now.
+                    strip_legacy_ect(datum, context = f"{processing_state}.jsonl row {position}: ")
                     old_data.append(datum)
 
             previously_handled = [datum.get('file_path', datum['image']) for datum in old_data]
@@ -521,11 +594,6 @@ class valve:
                         core_temp = None
                     print(f"Temp mask for labels {label}: {temp_mask}")
 
-                    # Find the extended column test for this snow column. One ECT
-                    # per column, so every row of this (site, column) carries the
-                    # same seven values.
-                    ect_values = self.ect_for(label[0], label[1])
-
                     # Iterate through all files
                     for image_filepath in datatype_images:
                         image_filename = os.path.basename(image_filepath)
@@ -539,18 +607,6 @@ class valve:
                         if image_number >= label_image_number and image_number < next_image_number:
                             # Assess core depth
                             core_depth = label[2] * 10.0
-
-                            # Decide what split to put it in
-                            if processing_state == 'preprocessed':
-                                flip = random.random()
-                                if flip <= 0.8:
-                                    split = 'train'
-                                elif flip > 0.8 and flip <= 0.9:
-                                    split = 'test'
-                                else:
-                                    split = 'validation'
-                            else:
-                                split = 'none'
 
                             # Create metadata entry (cast pandas/numpy scalars to native
                             # Python types so the entries stay JSON serializable)
@@ -577,8 +633,6 @@ class valve:
                                 'avalanches_spotted': int(self.sites.loc[site_mask, 'avalanches_spotted'].iloc[0]),
                                 'wind_loading': str(self.sites.loc[site_mask, 'wind_loading'].iloc[0]),
                                 'notes': str(self.sites.loc[site_mask, 'notes'].iloc[0]),
-                                **ect_values,
-                                'split': split
                             }
 
                             # Append to the jsonl dataframe
@@ -596,44 +650,70 @@ class valve:
                             break
             
             # Append new data onto old
-            jsonl_data = old_data + jsonl_data
+            image_tables[processing_state] = old_data + jsonl_data
 
-            # Re-check the schema over everything about to be written, so a bad
-            # record fails here rather than silently reaching the Hub
-            for position, entry in enumerate(jsonl_data):
-                ect.validate_ect(entry, context = f"{processing_state}.jsonl entry {position}: ")
-            ect.validate_group_constancy(jsonl_data, context = f"{processing_state}.jsonl: ")
+        # Assemble the side tables and check every link before writing anything
+        side_tables = self.build_side_tables(image_tables)
 
-            train_data = []
-            test_data = []
-            validation_data = []
-            for ind in range(len(jsonl_data)):
-                split = jsonl_data[ind].pop('split', 'none')
-                
-                # Check if training data
-                if split == 'train':
-                    train_data.append(jsonl_data[ind])
+        for processing_state, rows in image_tables.items():
+            schema.write_jsonl(f"{self.dataset_dir}metadata/{processing_state}.jsonl", rows)
 
-                # Check if test data
-                if split == 'test':
-                    test_data.append(jsonl_data[ind])
+        for spec in SIDE_TABLES:
+            schema.write_jsonl(f"{self.dataset_dir}metadata/{spec.name}.jsonl", side_tables[spec.name])
+            print(f"Wrote {len(side_tables[spec.name])} {spec.name} record(s)")
 
-                # Check if validation data
-                if split == 'validation':
-                    validation_data.append(jsonl_data[ind])
+    def build_side_tables(self, image_tables):
+        """
+        Merge the published side tables with the intake masters and validate.
 
-            # Construct filepath and write data
-            metadata_path = f"{self.dataset_dir}metadata/{processing_state}.jsonl"
-            with open(metadata_path, 'w') as f:
-                for entry in jsonl_data:
-                    f.write(json.dumps(entry) + '\n')
+        Rows already in metadata/<table>.jsonl are kept (the same way image rows
+        are); rows from intake/site_<table>.csv are added. The same key recorded
+        differently in the two raises. A core that has image rows but no cores
+        record gets one carrying only what the legacy pipeline recorded -- its
+        ladder depth and, if there is a site_temps reading, its temperature -- with
+        a warning, so photographed cores are never dangling. A site with image rows
+        but no pits record raises: collector_id and method_deviation cannot be
+        invented.
 
-        # Save data
-        for dtype, data in zip(['train', 'test', 'validation'], [train_data, test_data, validation_data]):
-            jsonl_path = f"{self.dataset_dir}metadata/{dtype}.jsonl"
-            with open(jsonl_path, 'w') as f:
-                for entry in data:
-                    f.write(json.dumps(entry) + '\n')
+        Arguments:
+            - image_tables (dict) - {'raw': rows, 'preprocessed': rows}
+        """
+        image_rows = [row for rows in image_tables.values() for row in rows]
+        warnings = []
+        side_tables = {}
+        for spec in SIDE_TABLES:
+            path = f"{self.dataset_dir}metadata/{spec.name}.jsonl"
+            published = read_jsonl(path) if os.path.exists(path) else []
+            for position, row in enumerate(published):
+                spec.validate(row, context = f"{spec.name}.jsonl row {position}: ")
+            side_tables[spec.name] = schema.merge_records(
+                spec, published, self.side_tables[spec.name], context = f"{spec.name}: "
+            )
+
+        # Photographed cores without a cores record
+        known = {cores.SPEC.key_of(row) for row in side_tables['cores']}
+        missing = sorted({(row['site'], row['column'], row['core']) for row in image_rows} - known)
+        for site, column, core in missing:
+            temp_mask = (self.temps['site'] == site) & (self.temps['column'] == column) & (self.temps['core'] == core)
+            reading = float(self.temps.loc[temp_mask, 'core_temperature'].iloc[0]) if temp_mask.any() else None
+            if reading is not None and pd.isna(reading):
+                reading = None
+            side_tables['cores'].append(cores.legacy_core_row(site, column, core, reading))
+        if missing:
+            warnings.append(
+                f"{len(missing)} photographed core(s) had no site_cores.csv record; "
+                f"wrote rows carrying only the ladder depth and any site_temps reading "
+                f"(breakability_field_count, recovery_quality, layer_ids are null): "
+                f"{missing[:8]}{' ...' if len(missing) > 8 else ''}"
+            )
+        side_tables['cores'].sort(key = cores.SPEC.key_of)
+
+        for spec in SIDE_TABLES:
+            warnings.extend(spec.validate_table(side_tables[spec.name], context = f"{spec.name}: "))
+        warnings.extend(schema.validate_dataset(side_tables, image_rows = image_rows, context = "metadata: "))
+        for warning in warnings:
+            print(f"WARNING: {warning}")
+        return side_tables
 
 
     def backup_intakes(self):
@@ -643,7 +723,7 @@ class valve:
         """
 
     def upload_huggingface(self, repo_id = HF_DATASET_REPO, dry_run = True,
-                           token = None, allow_shrink = False):
+                           token = None, allow_shrink = False, commit_message = None):
         """
         Upload this dataset's metadata and card to the Hugging Face dataset repo.
 
@@ -656,6 +736,7 @@ class valve:
             dry_run = dry_run,
             token = token,
             allow_shrink = allow_shrink,
+            commit_message = commit_message,
         )
 
     def save_state(self):
@@ -670,7 +751,8 @@ class valve:
         # Save temperature data
         self.temps.to_csv(f"{self.dataset_dir}intake/site_temps.csv", index = False)
 
-        # Save extended column test data
-        self.ects.to_csv(f"{self.dataset_dir}intake/site_ects.csv", index = False)
+        # Save the side tables collected under the field protocol
+        for spec in SIDE_TABLES:
+            schema.write_csv(spec, f"{self.dataset_dir}intake/{side_table_csv(spec)}", self.side_tables[spec.name])
 
         print(f"Intake records saved...")

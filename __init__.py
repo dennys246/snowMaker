@@ -7,19 +7,31 @@ dataset hosting on hugging faces
 
 Modules:
 - pipeline: Class for piping snowpack data
-- ect: Schema, domains and validation for the extended column test columns
+- schema: Shared machinery for the metadata side tables
+- pits, layers, cores, ect: One table each -- fields, domains and validation
+- card: Dataset-card fragments generated from the table specs
 """
 
 # Explicit imports from modules
 import intake
+import schema
+import pits
+import layers
+import cores
 import ect
+import card
 from pipeline import pipeline
 from segmenter import colorSegmenter
 
 # Define the public API
 __all__ = [
     "intake",
+    "schema",
+    "pits",
+    "layers",
+    "cores",
     "ect",
+    "card",
     "colorSegmenter",
     "pipeline"
 ]
