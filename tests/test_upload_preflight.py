@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import intake
+import schema
 
 
 def rows(*paths):
@@ -60,6 +61,14 @@ def test_row_order_and_duplicates_do_not_affect_the_diff():
     assert added == set() and removed == set()
 
 
+def test_side_tables_diff_on_their_key():
+    local = [{'site': 8, 'column': 1, 'core': 1}, {'site': 8, 'column': 1, 'core': 2}]
+    hub = [{'site': 8, 'column': 1, 'core': 1}, {'site': 7, 'column': 1, 'core': 1}]
+    added, removed = intake.diff_metadata(local, hub, key = ('site', 'column', 'core'))
+    assert added == {(8, 1, 2)}
+    assert removed == {(7, 1, 1)}
+
+
 def test_read_jsonl_round_trips(tmp_path):
     path = tmp_path / "sample.jsonl"
     path.write_text(
@@ -73,3 +82,19 @@ def test_read_jsonl_round_trips(tmp_path):
         {'file_path': 'a.png', 'ect_result': None},
         {'file_path': 'b.png', 'ect_result': 'X'},
     ]
+
+
+def test_validate_metadata_dir_refuses_unmigrated_image_rows(tmp_path):
+    (tmp_path / "metadata").mkdir()
+    schema.write_jsonl(str(tmp_path / "metadata" / "preprocessed.jsonl"),
+                       [{'file_path': 'a.png', 'site': 0, 'column': 1, 'core': 1, 'ect_result': None}])
+    with pytest.raises(schema.SchemaError, match = "migrate_side_tables"):
+        intake.validate_metadata_dir(str(tmp_path))
+
+
+def test_validate_metadata_dir_refuses_missing_side_tables(tmp_path):
+    (tmp_path / "metadata").mkdir()
+    schema.write_jsonl(str(tmp_path / "metadata" / "preprocessed.jsonl"),
+                       [{'file_path': 'a.png', 'site': 0, 'column': 1, 'core': 1}])
+    with pytest.raises(schema.SchemaError, match = "pits.jsonl is missing"):
+        intake.validate_metadata_dir(str(tmp_path))
